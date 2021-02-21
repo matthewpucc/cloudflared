@@ -1,11 +1,7 @@
 # use a builder image for building cloudflare
-ARG TARGET_GOOS
-ARG TARGET_GOARCH
 FROM golang:1.15.7 as builder
 ENV GO111MODULE=on \
-    CGO_ENABLED=0 \
-    TARGET_GOOS=${TARGET_GOOS} \
-    TARGET_GOARCH=${TARGET_GOARCH}
+    CGO_ENABLED=0
 
 WORKDIR /go/src/github.com/cloudflare/cloudflared/
 
