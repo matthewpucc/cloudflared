@@ -1,6 +1,7 @@
 package connection
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -14,7 +15,7 @@ import (
 const LogFieldConnIndex = "connIndex"
 
 type Config struct {
-	OriginClient    OriginClient
+	OriginProxy     OriginProxy
 	GracePeriod     time.Duration
 	ReplaceExisting bool
 }
@@ -50,14 +51,49 @@ func (c *ClassicTunnelConfig) IsTrialZone() bool {
 	return c.Hostname == ""
 }
 
-type OriginClient interface {
-	Proxy(w ResponseWriter, req *http.Request, isWebsocket bool) error
+// Type indicates the connection type of the  connection.
+type Type int
+
+const (
+	TypeWebsocket Type = iota
+	TypeTCP
+	TypeControlStream
+	TypeHTTP
+)
+
+// ShouldFlush returns whether this kind of connection should actively flush data
+func (t Type) shouldFlush() bool {
+	switch t {
+	case TypeWebsocket, TypeTCP, TypeControlStream:
+		return true
+	default:
+		return false
+	}
+}
+
+func (t Type) String() string {
+	switch t {
+	case TypeWebsocket:
+		return "websocket"
+	case TypeTCP:
+		return "tcp"
+	case TypeControlStream:
+		return "control stream"
+	case TypeHTTP:
+		return "http"
+	default:
+		return fmt.Sprintf("Unknown Type %d", t)
+	}
+}
+
+type OriginProxy interface {
+	// If Proxy returns an error, the caller is responsible for writing the error status to ResponseWriter
+	Proxy(w ResponseWriter, req *http.Request, sourceConnectionType Type) error
 }
 
 type ResponseWriter interface {
-	WriteRespHeaders(*http.Response) error
-	WriteErrorResponse()
-	io.ReadWriter
+	WriteRespHeaders(status int, header http.Header) error
+	io.Writer
 }
 
 type ConnectedFuse interface {

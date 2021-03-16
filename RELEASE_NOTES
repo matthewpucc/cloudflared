@@ -1,3 +1,73 @@
+2021.3.1
+- 2021-03-11 TUN-4051: Add component-tests to test graceful shutdown
+- 2021-03-12 TUN-4052: Add component tests to assert service mode behavior
+
+2021.3.0
+- 2021-03-10 TUN-4075: Dedup test should not compare order of list
+- 2021-03-10 Revert "AUTH-3394: Creates a token per app instead of per path"
+- 2021-03-11 TUN-4066: Remove unnecessary chmod during package publish to CF_PKG_HOSTS
+- 2021-03-11 TUN-4066: Set permissions in build agent before 'scp'-ing to machine hosting package repo
+- 2021-03-11 TUN-4050: Add component tests to assert reconnect behavior
+- 2021-03-10 AUTH-3394: Creates a token per app instead of per path - with fix for free tunnels
+- 2021-03-15 Publish change log for 2021.3.0
+- 2021-03-01 Issue #285 - Makefile does not detect TARGET_ARCH correctly on FreeBSD  (#325)
+- 2021-03-01 TUN-3988: Log why it cannot check if origin cert exists
+- 2021-03-02 TUN-3995: Optional --features flag for tunnel run.
+- 2021-03-02 TUN-3994: Log client_id when running a named tunnel
+- 2021-03-04 TUN-4026: Fix regression where HTTP2 edge transport was no longer propagating control plane errors
+- 2021-03-05 TUN-4055: Skeleton for component tests
+- 2021-03-08 TUN-4047: Add cfsetup target to run component test
+- 2021-03-08 TUN-4016: Delegate decision to update for Worker service
+- 2021-03-02 TUN-3905: Cannot run go mod vendor in cloudflared due to fips
+- 2021-03-08 TUN-4063: Cleanup dependencies between packages.
+- 2021-03-09 Allow partial reads from a GorillaConn; add SetDeadline (from net.Conn) (#330)
+- 2021-03-09 TUN-4069: Fix regression on support for websocket over proxy
+- 2021-03-02 AUTH-3394: Creates a token per app instead of per path
+- 2021-03-01 TUN-4017: Add support for using cloudflared as a full socks proxy.
+- 2021-03-08 TUN-4062: Read component tests config from yaml file
+- 2021-03-08 TUN-4049: Add component tests to assert logging behavior when running from terminal
+- 2021-02-23 TUN-3963: Repoint urfave/cli/v2 library at patched branch at github.com/ipostelnik/cli/v2@fixed which correctly handles reading flags declared at multiple levels of subcommands.
+- 2021-02-25 TUN-3970: Route ip show has alias route ip list
+- 2021-02-26 TUN-3978: Unhide teamnet commands and improve their help
+- 2021-02-26 TUN-3983: Renew CA certs in cloudflared
+- 2021-02-28 TUN-3989: Check in with Updater service in more situations and convey messages to user
+- 2021-02-11 TUN-3819: Remove client-side check that deleted tunnels have no connections
+
+2021.2.5
+- 2021-02-23 Publish change notes for 2021.2.5
+- 2021-02-11 TUN-3838: ResponseWriter no longer reads and origin error tests
+- 2021-02-10 TUN-3895: Tests for socks stream handler
+- 2021-02-19 TUN-3939: Add logging that shows that Warp-routing is enabled
+- 2021-02-02 TUN-3817: Adds tests for websocket based streaming regression
+- 2021-02-04 TUN-3799: extended the Stream interface to take a logger and added debug logs for io.Copy errors
+- 2021-02-03 TUN-3855: Add ability to override target of 'access ssh' command to a different host for testing
+- 2021-02-04 TUN-3853: Respond with ws headers from the origin service rather than generating our own
+- 2021-02-08 TUN-3889: Move host header override logic to httpService
+- 2021-02-05 TUN-3868: Refactor singleTCPService and bridgeService to tcpOverWSService and rawTCPService
+- 2021-01-21 TUN-3753: Select http2 protocol when warp routing is enabled
+- 2021-01-26 TUN-3809: Allow routes ip show to output as JSON or YAML
+- 2021-01-11 TUN-3615: added support to  proxy tcp streams
+- 2021-01-17 TUN-3725: Warp-routing is independent of ingress
+- 2021-01-15 TUN-3764: Actively flush data for TCP streams
+- 2020-12-09 TUN-3617: Separate service from client, and implement different client for http vs. tcp origins
+
+2021.2.4
+- 2021-02-22 TUN-3948: Log error when retrying connection
+- 2021-02-23 TUN-3964: Revert "TUN-3922: Repoint urfave/cli/v2 library at patched branch at github.com/ipostelnik/cli/v2@fixed which correctly handles reading flags declared at multiple levels of subcommands."
+- 2021-02-23 Publish release notes for 2021.2.4
+
+2021.2.3
+- 2021-02-23 Publish release notes for 2021.2.3
+- 2021-02-10 TUN-3902: Add jitter to backoffhandler
+- 2021-02-11 TUN-3913: Help gives wrong exit code for autoupdate
+- 2021-02-12 Add max upstream connections dns-proxy option (#290)
+- 2021-02-16 TUN-3924: Removed db-connect command. Added a placeholder handler for this command that informs users that command is no longer supported.
+- 2021-02-12 TUN-3922: Repoint urfave/cli/v2 library at patched branch at github.com/ipostelnik/cli/v2@fixed which correctly handles reading flags declared at multiple levels of subcommands.
+- 2021-02-19 Added support for proxy (#318)
+- 2021-02-19 TUN-3945: Fix runApp signature for generic service
+- 2021-02-09 Update README.md
+- 2021-02-09 Update the TryCloudflare link
+
 2021.2.2
 - 2021-02-04 TUN-3864: Users can choose where credentials file is written after creating a tunnel
 - 2021-02-04 TUN-3869: Improve reliability of graceful shutdown.

@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/buildinfo"
-	"github.com/cloudflare/cloudflared/cmd/cloudflared/config"
+	"github.com/cloudflare/cloudflared/config"
 	"github.com/cloudflare/cloudflared/connection"
 	"github.com/cloudflare/cloudflared/edgediscovery"
 	"github.com/cloudflare/cloudflared/h2mux"
@@ -109,7 +109,7 @@ func findOriginCert(originCertPath string, log *zerolog.Logger) (string, error) 
 	// Check that the user has acquired a certificate using the login command
 	ok, err := config.FileExists(originCertPath)
 	if err != nil {
-		log.Error().Msgf("Cannot check if origin cert exists at path %s", originCertPath)
+		log.Error().Err(err).Msgf("Cannot check if origin cert exists at path %s", originCertPath)
 		return "", fmt.Errorf("cannot check if origin cert exists at path %s", originCertPath)
 	}
 	if !ok {
@@ -195,18 +195,21 @@ func prepareTunnelConfig(
 		ingressRules  ingress.Ingress
 		classicTunnel *connection.ClassicTunnelConfig
 	)
+	cfg := config.GetConfiguration()
 	if isNamedTunnel {
 		clientUUID, err := uuid.NewRandom()
 		if err != nil {
 			return nil, ingress.Ingress{}, errors.Wrap(err, "can't generate clientUUID")
 		}
+		log.Info().Msgf("Generated Client ID: %s", clientUUID)
+		features := append(c.StringSlice("features"), origin.FeatureSerializedHeaders)
 		namedTunnel.Client = tunnelpogs.ClientInfo{
 			ClientID: clientUUID[:],
-			Features: []string{origin.FeatureSerializedHeaders},
+			Features: dedup(features),
 			Version:  version,
-			Arch:     fmt.Sprintf("%s_%s", buildInfo.GoOS, buildInfo.GoArch),
+			Arch:     buildInfo.OSArch(),
 		}
-		ingressRules, err = ingress.ParseIngress(config.GetConfiguration())
+		ingressRules, err = ingress.ParseIngress(cfg)
 		if err != nil && err != ingress.ErrNoIngressRules {
 			return nil, ingress.Ingress{}, err
 		}
@@ -230,7 +233,14 @@ func prepareTunnelConfig(
 		}
 	}
 
-	protocolSelector, err := connection.NewProtocolSelector(c.String("protocol"), namedTunnel, edgediscovery.HTTP2Percentage, origin.ResolveTTL, log)
+	var warpRoutingService *ingress.WarpRoutingService
+	warpRoutingEnabled := isWarpRoutingEnabled(cfg.WarpRouting, isNamedTunnel)
+	if warpRoutingEnabled {
+		warpRoutingService = ingress.NewWarpRoutingService()
+		log.Info().Msgf("Warp-routing is enabled")
+	}
+
+	protocolSelector, err := connection.NewProtocolSelector(c.String("protocol"), warpRoutingEnabled, namedTunnel, edgediscovery.HTTP2Percentage, origin.ResolveTTL, log)
 	if err != nil {
 		return nil, ingress.Ingress{}, err
 	}
@@ -245,9 +255,9 @@ func prepareTunnelConfig(
 		edgeTLSConfigs[p] = edgeTLSConfig
 	}
 
-	originClient := origin.NewClient(ingressRules, tags, log)
+	originProxy := origin.NewOriginProxy(ingressRules, warpRoutingService, tags, log)
 	connectionConfig := &connection.Config{
-		OriginClient:    originClient,
+		OriginProxy:     originProxy,
 		GracePeriod:     c.Duration("grace-period"),
 		ReplaceExisting: c.Bool("force"),
 	}
@@ -262,7 +272,7 @@ func prepareTunnelConfig(
 
 	return &origin.TunnelConfig{
 		ConnectionConfig: connectionConfig,
-		BuildInfo:        buildInfo,
+		OSArch:           buildInfo.OSArch(),
 		ClientID:         clientID,
 		EdgeAddrs:        c.StringSlice("edge"),
 		HAConnections:    c.Int("ha-connections"),
@@ -286,6 +296,29 @@ func prepareTunnelConfig(
 	}, ingressRules, nil
 }
 
+func isWarpRoutingEnabled(warpConfig config.WarpRoutingConfig, isNamedTunnel bool) bool {
+	return warpConfig.Enabled && isNamedTunnel
+}
+
 func isRunningFromTerminal() bool {
 	return terminal.IsTerminal(int(os.Stdout.Fd()))
+}
+
+// Remove any duplicates from the slice
+func dedup(slice []string) []string {
+
+	// Convert the slice into a set
+	set := make(map[string]bool, 0)
+	for _, str := range slice {
+		set[str] = true
+	}
+
+	// Convert the set back into a slice
+	keys := make([]string, len(set))
+	i := 0
+	for str := range set {
+		keys[i] = str
+		i++
+	}
+	return keys
 }

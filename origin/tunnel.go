@@ -15,7 +15,6 @@ import (
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/cloudflare/cloudflared/cmd/cloudflared/buildinfo"
 	"github.com/cloudflare/cloudflared/connection"
 	"github.com/cloudflare/cloudflared/edgediscovery"
 	"github.com/cloudflare/cloudflared/h2mux"
@@ -40,7 +39,7 @@ const (
 
 type TunnelConfig struct {
 	ConnectionConfig *connection.Config
-	BuildInfo        *buildinfo.BuildInfo
+	OSArch           string
 	ClientID         string
 	CloseConnOnce    *sync.Once // Used to close connectedSignal no more than once
 	EdgeAddrs        []string
@@ -72,7 +71,7 @@ func (c *TunnelConfig) RegistrationOptions(connectionID uint8, OriginLocalIP str
 	return &tunnelpogs.RegistrationOptions{
 		ClientID:             c.ClientID,
 		Version:              c.ReportedVersion,
-		OS:                   fmt.Sprintf("%s_%s", c.BuildInfo.GoOS, c.BuildInfo.GoArch),
+		OS:                   c.OSArch,
 		ExistingTunnelPolicy: policy,
 		PoolName:             c.LBPool,
 		Tags:                 c.Tags,
@@ -244,7 +243,7 @@ func selectNextProtocol(
 // on error returns a flag indicating if error can be retried
 func ServeTunnel(
 	ctx context.Context,
-	connLong *zerolog.Logger,
+	connLog *zerolog.Logger,
 	credentialManager *reconnectCredentialManager,
 	config *TunnelConfig,
 	addr *net.TCPAddr,
@@ -273,6 +272,7 @@ func ServeTunnel(
 
 	edgeConn, err := edgediscovery.DialEdge(ctx, dialTimeout, config.EdgeTLSConfigs[protocol], addr)
 	if err != nil {
+		connLog.Err(err).Msg("Unable to establish connection with Cloudflare edge")
 		return err, true
 	}
 	connectedFuse := &connectedFuse{
@@ -284,7 +284,7 @@ func ServeTunnel(
 		connOptions := config.ConnectionOptions(edgeConn.LocalAddr().String(), uint8(backoff.retries))
 		err = ServeHTTP2(
 			ctx,
-			connLong,
+			connLog,
 			config,
 			edgeConn,
 			connOptions,
@@ -296,7 +296,7 @@ func ServeTunnel(
 	} else {
 		err = ServeH2mux(
 			ctx,
-			connLong,
+			connLog,
 			credentialManager,
 			config,
 			edgeConn,
@@ -311,28 +311,29 @@ func ServeTunnel(
 	if err != nil {
 		switch err := err.(type) {
 		case connection.DupConnRegisterTunnelError:
+			connLog.Err(err).Msg("Unable to establish connection.")
 			// don't retry this connection anymore, let supervisor pick a new address
 			return err, false
 		case connection.ServerRegisterTunnelError:
-			connLong.Err(err).Msg("Register tunnel error from server side")
+			connLog.Err(err).Msg("Register tunnel error from server side")
 			// Don't send registration error return from server to Sentry. They are
 			// logged on server side
 			if incidents := config.IncidentLookup.ActiveIncidents(); len(incidents) > 0 {
-				connLong.Error().Msg(activeIncidentsMsg(incidents))
+				connLog.Error().Msg(activeIncidentsMsg(incidents))
 			}
 			return err.Cause, !err.Permanent
 		case ReconnectSignal:
-			connLong.Info().
+			connLog.Info().
 				Uint8(connection.LogFieldConnIndex, connIndex).
 				Msgf("Restarting connection due to reconnect signal in %s", err.Delay)
 			err.DelayBeforeReconnect()
 			return err, true
 		default:
 			if err == context.Canceled {
-				connLong.Debug().Err(err).Msgf("Serve tunnel error")
+				connLog.Debug().Err(err).Msgf("Serve tunnel error")
 				return err, false
 			}
-			connLong.Err(err).Msgf("Serve tunnel error")
+			connLog.Err(err).Msgf("Serve tunnel error")
 			_, permanent := err.(unrecoverableError)
 			return err, !permanent
 		}

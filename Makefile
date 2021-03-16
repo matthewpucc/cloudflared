@@ -34,6 +34,8 @@ ifneq ($(GOARCH),)
     TARGET_ARCH ?= $(GOARCH)
 else ifeq ($(LOCAL_ARCH),x86_64)
     TARGET_ARCH ?= amd64
+else ifeq ($(LOCAL_ARCH),amd64)
+    TARGET_ARCH ?= amd64
 else ifeq ($(LOCAL_ARCH),i686)
     TARGET_ARCH ?= amd64
 else ifeq ($(shell echo $(LOCAL_ARCH) | head -c 5),armv8)
@@ -80,7 +82,17 @@ clean:
 
 .PHONY: cloudflared
 cloudflared: tunnel-deps
+ifeq ($(FIPS), true)
+	$(info Building cloudflared with go-fips)
+	-test -f fips/fips.go && mv fips/fips.go fips/fips.go.linux-amd64
+	mv fips/fips.go.linux-amd64 fips/fips.go
+endif
+
 	GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH) go build -v -mod=vendor $(GO_BUILD_TAGS) $(VERSION_FLAGS) $(IMPORT_PATH)/cmd/cloudflared
+
+ifeq ($(FIPS), true)
+	mv fips/fips.go fips/fips.go.linux-amd64
+endif
 
 .PHONY: container
 container:
@@ -101,10 +113,10 @@ test-ssh-server:
 	docker-compose -f ssh_server_tests/docker-compose.yml up
 
 define publish_package
+	chmod 664 cloudflared*.$(1); \
 	for HOST in $(CF_PKG_HOSTS); do \
 		ssh-keyscan -t rsa $$HOST >> ~/.ssh/known_hosts; \
-		scp -4 cloudflared*.$(1) cfsync@$$HOST:/state/cf-pkg/staging/$(2)/$(TARGET_PUBLIC_REPO)/cloudflared/; \
-		ssh cfsync@$$HOST 'chmod g+w /state/cf-pkg/staging/$(2)/$(TARGET_PUBLIC_REPO)/cloudflared/*.$(1)'; \
+		scp -p -4 cloudflared*.$(1) cfsync@$$HOST:/state/cf-pkg/staging/$(2)/$(TARGET_PUBLIC_REPO)/cloudflared/; \
 	done
 endef
 
@@ -236,7 +248,7 @@ tunnelrpc/tunnelrpc.capnp.go: tunnelrpc/tunnelrpc.capnp
 .PHONY: vet
 vet:
 	go vet -mod=vendor ./...
-	which go-sumtype  # go get github.com/BurntSushi/go-sumtype
+	which go-sumtype  # go get github.com/BurntSushi/go-sumtype (don't do this in build directory or this will cause vendor issues)
 	go-sumtype $$(go list -mod=vendor ./...)
 
 .PHONY: msi

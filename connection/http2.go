@@ -19,6 +19,7 @@ import (
 
 const (
 	internalUpgradeHeader = "Cf-Cloudflared-Proxy-Connection-Upgrade"
+	tcpStreamHeader       = "Cf-Cloudflared-Proxy-Src"
 	websocketUpgrade      = "websocket"
 	controlStreamUpgrade  = "control-stream"
 )
@@ -96,31 +97,25 @@ func (c *http2Connection) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.activeRequestsWG.Add(1)
 	defer c.activeRequestsWG.Done()
 
-	respWriter := &http2RespWriter{
-		r: r.Body,
-		w: w,
-	}
-	flusher, isFlusher := w.(http.Flusher)
-	if !isFlusher {
-		c.observer.log.Error().Msgf("%T doesn't implement http.Flusher", w)
-		respWriter.WriteErrorResponse()
+	connType := determineHTTP2Type(r)
+	respWriter, err := newHTTP2RespWriter(r, w, connType)
+	if err != nil {
+		c.observer.log.Error().Msg(err.Error())
 		return
 	}
-	respWriter.flusher = flusher
-	var err error
-	if isControlStreamUpgrade(r) {
-		respWriter.shouldFlush = true
-		err = c.serveControlStream(r.Context(), respWriter)
-		c.controlStreamErr = err
-	} else if isWebsocketUpgrade(r) {
-		respWriter.shouldFlush = true
-		stripWebsocketUpgradeHeader(r)
-		err = c.config.OriginClient.Proxy(respWriter, r, true)
-	} else {
-		err = c.config.OriginClient.Proxy(respWriter, r, false)
-	}
 
-	if err != nil {
+	var proxyErr error
+	switch connType {
+	case TypeControlStream:
+		proxyErr = c.serveControlStream(r.Context(), respWriter)
+		c.controlStreamErr = proxyErr
+	case TypeWebsocket:
+		stripWebsocketUpgradeHeader(r)
+		proxyErr = c.config.OriginProxy.Proxy(respWriter, r, TypeWebsocket)
+	default:
+		proxyErr = c.config.OriginProxy.Proxy(respWriter, r, connType)
+	}
+	if proxyErr != nil {
 		respWriter.WriteErrorResponse()
 	}
 }
@@ -161,10 +156,29 @@ type http2RespWriter struct {
 	shouldFlush bool
 }
 
-func (rp *http2RespWriter) WriteRespHeaders(resp *http.Response) error {
+func newHTTP2RespWriter(r *http.Request, w http.ResponseWriter, connType Type) (*http2RespWriter, error) {
+	flusher, isFlusher := w.(http.Flusher)
+	if !isFlusher {
+		respWriter := &http2RespWriter{
+			r: r.Body,
+			w: w,
+		}
+		respWriter.WriteErrorResponse()
+		return nil, fmt.Errorf("%T doesn't implement http.Flusher", w)
+	}
+
+	return &http2RespWriter{
+		r:           r.Body,
+		w:           w,
+		flusher:     flusher,
+		shouldFlush: connType.shouldFlush(),
+	}, nil
+}
+
+func (rp *http2RespWriter) WriteRespHeaders(status int, header http.Header) error {
 	dest := rp.w.Header()
-	userHeaders := make(http.Header, len(resp.Header))
-	for header, values := range resp.Header {
+	userHeaders := make(http.Header, len(header))
+	for header, values := range header {
 		// Since these are http2 headers, they're required to be lowercase
 		h2name := strings.ToLower(header)
 		for _, v := range values {
@@ -184,13 +198,12 @@ func (rp *http2RespWriter) WriteRespHeaders(resp *http.Response) error {
 	// Perform user header serialization and set them in the single header
 	dest.Set(canonicalResponseUserHeadersField, h2mux.SerializeHeaders(userHeaders))
 	rp.setResponseMetaHeader(responseMetaHeaderOrigin)
-	status := resp.StatusCode
 	// HTTP2 removes support for 101 Switching Protocols https://tools.ietf.org/html/rfc7540#section-8.1.1
 	if status == http.StatusSwitchingProtocols {
 		status = http.StatusOK
 	}
 	rp.w.WriteHeader(status)
-	if IsServerSentEvent(resp.Header) {
+	if IsServerSentEvent(header) {
 		rp.shouldFlush = true
 	}
 	if rp.shouldFlush {
@@ -231,12 +244,30 @@ func (rp *http2RespWriter) Close() error {
 	return nil
 }
 
+func determineHTTP2Type(r *http.Request) Type {
+	switch {
+	case isWebsocketUpgrade(r):
+		return TypeWebsocket
+	case IsTCPStream(r):
+		return TypeTCP
+	case isControlStreamUpgrade(r):
+		return TypeControlStream
+	default:
+		return TypeHTTP
+	}
+}
+
 func isControlStreamUpgrade(r *http.Request) bool {
-	return strings.ToLower(r.Header.Get(internalUpgradeHeader)) == controlStreamUpgrade
+	return r.Header.Get(internalUpgradeHeader) == controlStreamUpgrade
 }
 
 func isWebsocketUpgrade(r *http.Request) bool {
-	return strings.ToLower(r.Header.Get(internalUpgradeHeader)) == websocketUpgrade
+	return r.Header.Get(internalUpgradeHeader) == websocketUpgrade
+}
+
+// IsTCPStream discerns if the connection request needs a tcp stream proxy.
+func IsTCPStream(r *http.Request) bool {
+	return r.Header.Get(tcpStreamHeader) != ""
 }
 
 func stripWebsocketUpgradeHeader(r *http.Request) {

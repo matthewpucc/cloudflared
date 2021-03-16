@@ -2,8 +2,6 @@ module github.com/cloudflare/cloudflared
 
 go 1.15
 
-replace github.com/urfave/cli/v2 => github.com/ipostelnik/cli/v2 v2.3.1-0.20210212191405-2b6ed1f5ef69
-
 require (
 	github.com/certifi/gocertifi v0.0.0-20200211180108-c7c1fbc02894 // indirect
 	github.com/cloudflare/brotli-go v0.0.0-20191101163834-d34379f7ff93
@@ -59,3 +57,5 @@ require (
 	gopkg.in/yaml.v3 v3.0.0-20200615113413-eeeca48fe776 // indirect
 	zombiezen.com/go/capnproto2 v2.18.0+incompatible
 )
+
+replace github.com/urfave/cli/v2 => github.com/ipostelnik/cli/v2 v2.3.1-0.20210223162147-c8b4f97735e4

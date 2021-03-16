@@ -22,7 +22,8 @@ import (
 	"gopkg.in/yaml.v2"
 
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
-	"github.com/cloudflare/cloudflared/cmd/cloudflared/config"
+	"github.com/cloudflare/cloudflared/cmd/cloudflared/updater"
+	"github.com/cloudflare/cloudflared/config"
 	"github.com/cloudflare/cloudflared/connection"
 	"github.com/cloudflare/cloudflared/tunnelstore"
 )
@@ -87,6 +88,11 @@ var (
 			"overwrite the previous tunnel. If you want to use a single hostname with multiple " +
 			"tunnels, you can do so with Cloudflare's Load Balancer product.",
 	})
+	featuresFlag = altsrc.NewStringSliceFlag(&cli.StringSliceFlag{
+		Name:    "features",
+		Aliases: []string{"F"},
+		Usage:   "Opt into various features that are still being developed or tested.",
+	})
 	credentialsFileFlag = altsrc.NewStringFlag(&cli.StringFlag{
 		Name:    CredFileFlag,
 		Aliases: []string{CredFileFlagAlias},
@@ -96,7 +102,8 @@ var (
 	forceDeleteFlag = &cli.BoolFlag{
 		Name:    "force",
 		Aliases: []string{"f"},
-		Usage:   "Allows you to delete a tunnel, even if it has active connections.",
+		Usage: "Cleans up any stale connections before the tunnel is deleted. cloudflared will not " +
+			"delete a tunnel with connections without this flag.",
 		EnvVars: []string{"TUNNEL_RUN_FORCE_OVERWRITE"},
 	}
 	selectProtocolFlag = altsrc.NewStringFlag(&cli.StringFlag{
@@ -143,6 +150,9 @@ func createCommand(c *cli.Context) error {
 		return cliutil.UsageError(`"cloudflared tunnel create" requires exactly 1 argument, the name of tunnel to create.`)
 	}
 	name := c.Args().First()
+
+	warningChecker := updater.StartWarningCheck(c)
+	defer warningChecker.LogWarningIfAny(sc.log)
 
 	_, err = sc.create(name, c.String(CredFileFlag))
 	return errors.Wrap(err, "failed to create tunnel")
@@ -222,6 +232,9 @@ func listCommand(c *cli.Context) error {
 		filter.ByTunnelID(tunnelID)
 	}
 
+	warningChecker := updater.StartWarningCheck(c)
+	defer warningChecker.LogWarningIfAny(sc.log)
+
 	tunnels, err := sc.list(filter)
 	if err != nil {
 		return err
@@ -266,6 +279,7 @@ func listCommand(c *cli.Context) error {
 	} else {
 		fmt.Println("You have no tunnels, use 'cloudflared tunnel create' to define a new tunnel")
 	}
+
 	return nil
 }
 
@@ -344,6 +358,9 @@ func deleteCommand(c *cli.Context) error {
 		return cliutil.UsageError(`"cloudflared tunnel delete" requires at least 1 argument, the ID or name of the tunnel to delete.`)
 	}
 
+	warningChecker := updater.StartWarningCheck(c)
+	defer warningChecker.LogWarningIfAny(sc.log)
+
 	tunnelIDs, err := sc.findIDs(c.Args().Slice())
 	if err != nil {
 		return err
@@ -370,6 +387,7 @@ func buildRunCommand() *cli.Command {
 		forceFlag,
 		credentialsFileFlag,
 		selectProtocolFlag,
+		featuresFlag,
 	}
 	flags = append(flags, configureProxyFlags(false)...)
 	return &cli.Command{
@@ -457,14 +475,23 @@ func buildRouteCommand() *cli.Command {
 	return &cli.Command{
 		Name:      "route",
 		Action:    cliutil.ErrorHandler(routeCommand),
-		Usage:     "Define what hostname or load balancer can route to this tunnel",
-		UsageText: "cloudflared tunnel [tunnel command options] route [subcommand options] dns|lb TUNNEL HOSTNAME [LB-POOL]",
-		Description: `The route defines what hostname or load balancer will proxy requests to this tunnel.
+		Usage:     "Define which traffic routed from Cloudflare edge to this tunnel: requests to a DNS hostname, to a Cloudflare Load Balancer, or traffic originating from Cloudflare WARP clients",
+		UsageText: "cloudflared tunnel [tunnel command options] route [subcommand options] [dns TUNNEL HOSTNAME]|[lb TUNNEL HOSTNAME LB-POOL]|[ip NETWORK TUNNEL]",
+		Description: `The route command defines how Cloudflare will proxy requests to this tunnel.
 
-   To route a hostname by creating a CNAME to tunnel's address:
-      cloudflared tunnel route dns <tunnel ID> <hostname>
-   To use this tunnel as a load balancer origin, creating pool and load balancer if necessary:
-      cloudflared tunnel route lb <tunnel ID> <load balancer name> <load balancer pool>`,
+To route a hostname by creating a DNS CNAME record to a tunnel:
+   cloudflared tunnel route dns <tunnel ID or name> <hostname>
+You can read more at: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/routing-to-tunnel/dns
+
+To use this tunnel as a load balancer origin, creating pool and load balancer if necessary:
+   cloudflared tunnel route lb <tunnel ID or name> <hostname> <load balancer pool>
+You can read more at: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/routing-to-tunnel/lb
+
+For Cloudflare WARP traffic to be routed to your private network, reachable from this tunnel as origins, use:
+   cloudflared tunnel route ip <network CIDR> <tunnel ID or name>
+Further information about managing Cloudflare WARP traffic to your tunnel is available at:
+   cloudflared tunnel route ip --help
+`,
 		CustomHelpTemplate: commandHelpTemplate(),
 		Subcommands: []*cli.Command{
 			buildRouteIPSubcommand(),

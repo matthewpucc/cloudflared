@@ -4,14 +4,15 @@
 package carrier
 
 import (
+	"crypto/tls"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"strings"
 
-	"github.com/cloudflare/cloudflared/cmd/cloudflared/token"
 	"github.com/cloudflare/cloudflared/h2mux"
+	"github.com/cloudflare/cloudflared/token"
 
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
@@ -20,8 +21,11 @@ import (
 const LogFieldOriginURL = "originURL"
 
 type StartOptions struct {
-	OriginURL string
-	Headers   http.Header
+	AppInfo         *token.AppInfo
+	OriginURL       string
+	Headers         http.Header
+	Host            string
+	TLSClientConfig *tls.Config
 }
 
 // Connection wraps up all the needed functions to forward over the tunnel
@@ -120,7 +124,7 @@ func IsAccessResponse(resp *http.Response) bool {
 	if err != nil || location == nil {
 		return false
 	}
-	if strings.HasPrefix(location.Path, "/cdn-cgi/access/login") {
+	if strings.HasPrefix(location.Path, token.AccessLoginWorkerPath) {
 		return true
 	}
 
@@ -134,7 +138,7 @@ func BuildAccessRequest(options *StartOptions, log *zerolog.Logger) (*http.Reque
 		return nil, err
 	}
 
-	token, err := token.FetchTokenWithRedirect(req.URL, log)
+	token, err := token.FetchTokenWithRedirect(req.URL, options.AppInfo, log)
 	if err != nil {
 		return nil, err
 	}

@@ -9,7 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cloudflare/cloudflared/cmd/cloudflared/config"
+	"github.com/cloudflare/cloudflared/config"
+	"github.com/cloudflare/cloudflared/ipaccess"
 
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
@@ -22,6 +23,12 @@ var (
 	errBadWildcard                = errors.New("Hostname patterns can have at most one wildcard character (\"*\") and it can only be used for subdomains, e.g. \"*.example.com\"")
 	errHostnameContainsPort       = errors.New("Hostname cannot contain a port")
 	ErrURLIncompatibleWithIngress = errors.New("You can't set the --url flag (or $TUNNEL_URL) when using multiple-origin ingress rules")
+)
+
+const (
+	ServiceBastion     = "bastion"
+	ServiceSocksProxy  = "socks-proxy"
+	ServiceWarpRouting = "warp-routing"
 )
 
 // FindMatchingRule returns the index of the Ingress Rule which matches the given
@@ -38,6 +45,7 @@ func (ing Ingress) FindMatchingRule(hostname, path string) (*Rule, int) {
 			return &rule, i
 		}
 	}
+
 	i := len(ing.Rules) - 1
 	return &ing.Rules[i], i
 }
@@ -84,17 +92,35 @@ func NewSingleOrigin(c *cli.Context, allowURLFromArgs bool) (Ingress, error) {
 	return ing, err
 }
 
+// WarpRoutingService starts a tcp stream between the origin and requests from
+// warp clients.
+type WarpRoutingService struct {
+	Proxy StreamBasedOriginProxy
+}
+
+func NewWarpRoutingService() *WarpRoutingService {
+	return &WarpRoutingService{Proxy: &rawTCPService{name: ServiceWarpRouting}}
+}
+
 // Get a single origin service from the CLI/config.
-func parseSingleOriginService(c *cli.Context, allowURLFromArgs bool) (OriginService, error) {
+func parseSingleOriginService(c *cli.Context, allowURLFromArgs bool) (originService, error) {
 	if c.IsSet("hello-world") {
 		return new(helloWorld), nil
 	}
-	if c.IsSet("url") || c.IsSet(config.BastionFlag) {
+	if c.IsSet(config.BastionFlag) {
+		return newBastionService(), nil
+	}
+	if c.IsSet("url") {
 		originURL, err := config.ValidateUrl(c, allowURLFromArgs)
 		if err != nil {
 			return nil, errors.Wrap(err, "Error validating origin URL")
 		}
-		return &localService{URL: originURL, RootURL: originURL}, nil
+		if isHTTPService(originURL) {
+			return &httpService{
+				url: originURL,
+			}, nil
+		}
+		return newTCPOverWSService(originURL), nil
 	}
 	if c.IsSet("unix-socket") {
 		path, err := config.ValidateUnixSocket(c)
@@ -104,7 +130,7 @@ func parseSingleOriginService(c *cli.Context, allowURLFromArgs bool) (OriginServ
 		return &unixSocketPath{path: path}, nil
 	}
 	u, err := url.Parse("http://localhost:8080")
-	return &localService{URL: u, RootURL: u}, err
+	return &httpService{url: u}, err
 }
 
 // IsEmpty checks if there are any ingress rules.
@@ -136,7 +162,7 @@ func validate(ingress []config.UnvalidatedIngressRule, defaults OriginRequestCon
 	rules := make([]Rule, len(ingress))
 	for i, r := range ingress {
 		cfg := setConfig(defaults, r.OriginRequest)
-		var service OriginService
+		var service originService
 
 		if prefix := "unix:"; strings.HasPrefix(r.Service, prefix) {
 			// No validation necessary for unix socket filepath services
@@ -151,12 +177,29 @@ func validate(ingress []config.UnvalidatedIngressRule, defaults OriginRequestCon
 			service = &srv
 		} else if r.Service == "hello_world" || r.Service == "hello-world" || r.Service == "helloworld" {
 			service = new(helloWorld)
-		} else if r.Service == "bastion" || cfg.BastionMode {
+		} else if r.Service == ServiceSocksProxy {
+			rules := make([]ipaccess.Rule, len(r.OriginRequest.IPRules))
+
+			for i, ipRule := range r.OriginRequest.IPRules {
+				rule, err := ipaccess.NewRuleByCIDR(ipRule.Prefix, ipRule.Ports, ipRule.Allow)
+				if err != nil {
+					return Ingress{}, fmt.Errorf("unable to create ip rule for %s: %s", r.Service, err)
+				}
+				rules[i] = rule
+			}
+
+			accessPolicy, err := ipaccess.NewPolicy(false, rules)
+			if err != nil {
+				return Ingress{}, fmt.Errorf("unable to create ip access policy for %s: %s", r.Service, err)
+			}
+
+			service = newSocksProxyOverWSService(accessPolicy)
+		} else if r.Service == ServiceBastion || cfg.BastionMode {
 			// Bastion mode will always start a Websocket proxy server, which will
 			// overwrite the localService.URL field when `start` is called. So,
 			// leave the URL field empty for now.
 			cfg.BastionMode = true
-			service = new(localService)
+			service = newBastionService()
 		} else {
 			// Validate URL services
 			u, err := url.Parse(r.Service)
@@ -171,8 +214,11 @@ func validate(ingress []config.UnvalidatedIngressRule, defaults OriginRequestCon
 			if u.Path != "" {
 				return Ingress{}, fmt.Errorf("%s is an invalid address, ingress rules don't support proxying to a different path on the origin service. The path will be the same as the eyeball request's path", r.Service)
 			}
-			serviceURL := localService{URL: u}
-			service = &serviceURL
+			if isHTTPService(u) {
+				service = &httpService{url: u}
+			} else {
+				service = newTCPOverWSService(u)
+			}
 		}
 
 		if err := validateHostname(r, i, len(ingress)); err != nil {
@@ -240,4 +286,8 @@ func ParseIngress(conf *config.Configuration) (Ingress, error) {
 		return Ingress{}, ErrNoIngressRules
 	}
 	return validate(conf.Ingress, originRequestFromYAML(conf.OriginRequest))
+}
+
+func isHTTPService(url *url.URL) bool {
+	return url.Scheme == "http" || url.Scheme == "https" || url.Scheme == "ws" || url.Scheme == "wss"
 }

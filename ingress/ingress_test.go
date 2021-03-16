@@ -3,6 +3,7 @@ package ingress
 import (
 	"flag"
 	"fmt"
+	"net/http"
 	"net/url"
 	"regexp"
 	"testing"
@@ -13,7 +14,8 @@ import (
 	"github.com/urfave/cli/v2"
 	"gopkg.in/yaml.v2"
 
-	"github.com/cloudflare/cloudflared/cmd/cloudflared/config"
+	"github.com/cloudflare/cloudflared/config"
+	"github.com/cloudflare/cloudflared/ipaccess"
 	"github.com/cloudflare/cloudflared/tlsconfig"
 )
 
@@ -61,12 +63,12 @@ ingress:
 			want: []Rule{
 				{
 					Hostname: "tunnel1.example.com",
-					Service:  &localService{URL: localhost8000},
+					Service:  &httpService{url: localhost8000},
 					Config:   defaultConfig,
 				},
 				{
 					Hostname: "*",
-					Service:  &localService{URL: localhost8001},
+					Service:  &httpService{url: localhost8001},
 					Config:   defaultConfig,
 				},
 			},
@@ -82,7 +84,22 @@ extraKey: extraValue
 			want: []Rule{
 				{
 					Hostname: "*",
-					Service:  &localService{URL: localhost8000},
+					Service:  &httpService{url: localhost8000},
+					Config:   defaultConfig,
+				},
+			},
+		},
+		{
+			name: "ws service",
+			args: args{rawYAML: `
+ingress:
+ - hostname: "*"
+   service: wss://localhost:8000
+`},
+			want: []Rule{
+				{
+					Hostname: "*",
+					Service:  &httpService{url: MustParseURL(t, "wss://localhost:8000")},
 					Config:   defaultConfig,
 				},
 			},
@@ -95,7 +112,7 @@ ingress:
 `},
 			want: []Rule{
 				{
-					Service: &localService{URL: localhost8000},
+					Service: &httpService{url: localhost8000},
 					Config:  defaultConfig,
 				},
 			},
@@ -210,6 +227,112 @@ ingress:
 			},
 		},
 		{
+			name: "TCP services",
+			args: args{rawYAML: `
+ingress:
+- hostname: tcp.foo.com
+  service: tcp://127.0.0.1
+- hostname: tcp2.foo.com
+  service: tcp://localhost:8000
+- service: http_status:404
+`},
+			want: []Rule{
+				{
+					Hostname: "tcp.foo.com",
+					Service:  newTCPOverWSService(MustParseURL(t, "tcp://127.0.0.1:7864")),
+					Config:   defaultConfig,
+				},
+				{
+					Hostname: "tcp2.foo.com",
+					Service:  newTCPOverWSService(MustParseURL(t, "tcp://localhost:8000")),
+					Config:   defaultConfig,
+				},
+				{
+					Service: &fourOhFour,
+					Config:  defaultConfig,
+				},
+			},
+		},
+		{
+			name: "SSH services",
+			args: args{rawYAML: `
+ingress:
+- service: ssh://127.0.0.1
+`},
+			want: []Rule{
+				{
+					Service: newTCPOverWSService(MustParseURL(t, "ssh://127.0.0.1:22")),
+					Config:  defaultConfig,
+				},
+			},
+		},
+		{
+			name: "RDP services",
+			args: args{rawYAML: `
+ingress:
+- service: rdp://127.0.0.1
+`},
+			want: []Rule{
+				{
+					Service: newTCPOverWSService(MustParseURL(t, "rdp://127.0.0.1:3389")),
+					Config:  defaultConfig,
+				},
+			},
+		},
+		{
+			name: "SMB services",
+			args: args{rawYAML: `
+ingress:
+- service: smb://127.0.0.1
+`},
+			want: []Rule{
+				{
+					Service: newTCPOverWSService(MustParseURL(t, "smb://127.0.0.1:445")),
+					Config:  defaultConfig,
+				},
+			},
+		},
+		{
+			name: "Other TCP services",
+			args: args{rawYAML: `
+ingress:
+- service: ftp://127.0.0.1
+`},
+			want: []Rule{
+				{
+					Service: newTCPOverWSService(MustParseURL(t, "ftp://127.0.0.1")),
+					Config:  defaultConfig,
+				},
+			},
+		},
+		{
+			name: "SOCKS services",
+			args: args{rawYAML: `
+ingress:
+- hostname: socks.foo.com
+  service: socks-proxy
+  originRequest:
+    ipRules:
+      - prefix: 1.1.1.0/24
+        ports: [80, 443]
+        allow: true
+      - prefix: 0.0.0.0/0
+        allow: false
+- service: http_status:404
+`},
+			want: []Rule{
+				{
+					Hostname: "socks.foo.com",
+					Service:  newSocksProxyOverWSService(accessPolicy()),
+					Config:   defaultConfig,
+				},
+				{
+					Service: &fourOhFour,
+					Config:  defaultConfig,
+				},
+			},
+		},
+		{
 			name: "URL isn't necessary if using bastion",
 			args: args{rawYAML: `
 ingress:
@@ -221,7 +344,7 @@ ingress:
 			want: []Rule{
 				{
 					Hostname: "bastion.foo.com",
-					Service:  &localService{},
+					Service:  newBastionService(),
 					Config:   setConfig(originRequestFromYAML(config.OriginRequestConfig{}), config.OriginRequestConfig{BastionMode: &tr}),
 				},
 				{
@@ -241,7 +364,7 @@ ingress:
 			want: []Rule{
 				{
 					Hostname: "bastion.foo.com",
-					Service:  &localService{},
+					Service:  newBastionService(),
 					Config:   setConfig(originRequestFromYAML(config.OriginRequestConfig{}), config.OriginRequestConfig{BastionMode: &tr}),
 				},
 				{
@@ -369,6 +492,7 @@ func TestFindMatchingRule(t *testing.T) {
 	tests := []struct {
 		host          string
 		path          string
+		req           *http.Request
 		wantRuleIndex int
 	}{
 		{
@@ -403,9 +527,40 @@ func TestFindMatchingRule(t *testing.T) {
 		},
 	}
 
-	for i, test := range tests {
+	for _, test := range tests {
 		_, ruleIndex := ingress.FindMatchingRule(test.host, test.path)
-		assert.Equal(t, test.wantRuleIndex, ruleIndex, fmt.Sprintf("Expect host=%s, path=%s to match rule %d, got %d", test.host, test.path, test.wantRuleIndex, i))
+		assert.Equal(t, test.wantRuleIndex, ruleIndex, fmt.Sprintf("Expect host=%s, path=%s to match rule %d, got %d", test.host, test.path, test.wantRuleIndex, ruleIndex))
+	}
+}
+
+func TestIsHTTPService(t *testing.T) {
+	tests := []struct {
+		url    *url.URL
+		isHTTP bool
+	}{
+		{
+			url:    MustParseURL(t, "http://localhost"),
+			isHTTP: true,
+		},
+		{
+			url:    MustParseURL(t, "https://127.0.0.1:8000"),
+			isHTTP: true,
+		},
+		{
+			url:    MustParseURL(t, "ws://localhost"),
+			isHTTP: true,
+		},
+		{
+			url:    MustParseURL(t, "wss://localhost:8000"),
+			isHTTP: true,
+		},
+		{
+			url:    MustParseURL(t, "tcp://localhost:9000"),
+			isHTTP: false,
+		},
+	}
+	for _, test := range tests {
+		assert.Equal(t, test.isHTTP, isHTTPService(test.url))
 	}
 }
 
@@ -419,6 +574,16 @@ func MustParseURL(t *testing.T, rawURL string) *url.URL {
 	u, err := url.Parse(rawURL)
 	require.NoError(t, err)
 	return u
+}
+
+func accessPolicy() *ipaccess.Policy {
+	cidr1 := "1.1.1.0/24"
+	cidr2 := "0.0.0.0/0"
+	rule1, _ := ipaccess.NewRuleByCIDR(&cidr1, []int{80, 443}, true)
+	rule2, _ := ipaccess.NewRuleByCIDR(&cidr2, nil, false)
+	rules := []ipaccess.Rule{rule1, rule2}
+	accessPolicy, _ := ipaccess.NewPolicy(false, rules)
+	return accessPolicy
 }
 
 func BenchmarkFindMatch(b *testing.B) {
@@ -436,6 +601,7 @@ ingress:
 	if err != nil {
 		b.Error(err)
 	}
+
 	for n := 0; n < b.N; n++ {
 		ing.FindMatchingRule("tunnel1.example.com", "")
 		ing.FindMatchingRule("tunnel2.example.com", "")

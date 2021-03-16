@@ -9,15 +9,15 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"testing"
 	"time"
 
-	"github.com/cloudflare/cloudflared/cmd/cloudflared/config"
-	cfpath "github.com/cloudflare/cloudflared/cmd/cloudflared/path"
 	"github.com/coreos/go-oidc/jose"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/cloudflare/cloudflared/config"
+	cfpath "github.com/cloudflare/cloudflared/token"
 )
 
 const (
@@ -32,10 +32,10 @@ type signingArguments struct {
 }
 
 func TestCertGenSuccess(t *testing.T) {
-	url, _ := url.Parse("https://cf-test-access.com/testpath")
+	appInfo := &cfpath.AppInfo{AppAUD: "abcd1234", AppDomain: "mySite.com"}
 	token := tokenGenerator()
 
-	fullName, err := cfpath.GenerateAppTokenFilePathFromURL(url, keyName)
+	fullName, err := cfpath.GenerateAppTokenFilePathFromURL(appInfo.AppDomain, appInfo.AppAUD, keyName)
 	assert.NoError(t, err)
 
 	pubKeyName := fullName + ".pub"
@@ -65,7 +65,7 @@ func TestCertGenSuccess(t *testing.T) {
 		return w.Result(), nil
 	}
 
-	err = GenerateShortLivedCertificate(url, token)
+	err = GenerateShortLivedCertificate(appInfo, token)
 	assert.NoError(t, err)
 
 	exist, err := config.FileExists(fullName)

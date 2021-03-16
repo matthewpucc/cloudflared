@@ -11,11 +11,11 @@ import (
 
 	"github.com/mitchellh/go-homedir"
 	"github.com/pkg/errors"
+	"github.com/rs/zerolog"
 	"github.com/urfave/cli/v2"
 	"gopkg.in/yaml.v2"
 
 	"github.com/cloudflare/cloudflared/validation"
-	"github.com/rs/zerolog"
 )
 
 var (
@@ -221,13 +221,26 @@ type OriginRequestConfig struct {
 	ProxyPort *uint `yaml:"proxyPort"`
 	// Valid options are 'socks' or empty.
 	ProxyType *string `yaml:"proxyType"`
+	// IP rules for the proxy service
+	IPRules []IngressIPRule `yaml:"ipRules"`
+}
+
+type IngressIPRule struct {
+	Prefix *string `yaml:"prefix"`
+	Ports  []int   `yaml:"ports"`
+	Allow  bool    `yaml:"allow"`
 }
 
 type Configuration struct {
 	TunnelID      string `yaml:"tunnel"`
 	Ingress       []UnvalidatedIngressRule
+	WarpRouting   WarpRoutingConfig   `yaml:"warp-routing"`
 	OriginRequest OriginRequestConfig `yaml:"originRequest"`
 	sourceFile    string
+}
+
+type WarpRoutingConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 type configFileSettings struct {

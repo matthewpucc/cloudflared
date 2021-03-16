@@ -7,8 +7,9 @@ import (
 	"net/http"
 	"net/http/httputil"
 
-	"github.com/cloudflare/cloudflared/cmd/cloudflared/token"
+	"github.com/cloudflare/cloudflared/ingress"
 	"github.com/cloudflare/cloudflared/socks"
+	"github.com/cloudflare/cloudflared/token"
 	cfwebsocket "github.com/cloudflare/cloudflared/websocket"
 
 	"github.com/gorilla/websocket"
@@ -23,7 +24,7 @@ type Websocket struct {
 }
 
 type wsdialer struct {
-	conn *cfwebsocket.Conn
+	conn *cfwebsocket.GorillaConn
 }
 
 func (d *wsdialer) Dial(address string) (io.ReadWriteCloser, *socks.AddrSpec, error) {
@@ -37,10 +38,9 @@ func (d *wsdialer) Dial(address string) (io.ReadWriteCloser, *socks.AddrSpec, er
 }
 
 // NewWSConnection returns a new connection object
-func NewWSConnection(log *zerolog.Logger, isSocks bool) Connection {
+func NewWSConnection(log *zerolog.Logger) Connection {
 	return &Websocket{
-		log:     log,
-		isSocks: isSocks,
+		log: log,
 	}
 }
 
@@ -54,41 +54,52 @@ func (ws *Websocket) ServeStream(options *StartOptions, conn io.ReadWriter) erro
 	}
 	defer wsConn.Close()
 
-	if ws.isSocks {
-		dialer := &wsdialer{conn: wsConn}
-		requestHandler := socks.NewRequestHandler(dialer)
-		socksServer := socks.NewConnectionHandler(requestHandler)
-
-		_ = socksServer.Serve(conn)
-	} else {
-		cfwebsocket.Stream(wsConn, conn)
-	}
+	ingress.Stream(wsConn, conn, ws.log)
 	return nil
 }
 
 // StartServer creates a Websocket server to listen for connections.
 // This is used on the origin (tunnel) side to take data from the muxer and send it to the origin
 func (ws *Websocket) StartServer(listener net.Listener, remote string, shutdownC <-chan struct{}) error {
-	return cfwebsocket.StartProxyServer(ws.log, listener, remote, shutdownC, cfwebsocket.DefaultStreamHandler)
+	return cfwebsocket.StartProxyServer(ws.log, listener, remote, shutdownC, ingress.DefaultStreamHandler)
 }
 
 // createWebsocketStream will create a WebSocket connection to stream data over
 // It also handles redirects from Access and will present that flow if
 // the token is not present on the request
-func createWebsocketStream(options *StartOptions, log *zerolog.Logger) (*cfwebsocket.Conn, error) {
+func createWebsocketStream(options *StartOptions, log *zerolog.Logger) (*cfwebsocket.GorillaConn, error) {
 	req, err := http.NewRequest(http.MethodGet, options.OriginURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header = options.Headers
+	if options.Host != "" {
+		req.Host = options.Host
+	}
 
 	dump, err := httputil.DumpRequest(req, false)
 	log.Debug().Msgf("Websocket request: %s", string(dump))
 
-	wsConn, resp, err := cfwebsocket.ClientConnect(req, nil)
+	dialer := &websocket.Dialer{
+		TLSClientConfig: options.TLSClientConfig,
+		Proxy:           http.ProxyFromEnvironment,
+	}
+	wsConn, resp, err := cfwebsocket.ClientConnect(req, dialer)
 	defer closeRespBody(resp)
 
 	if err != nil && IsAccessResponse(resp) {
+		// Only get Access app info if we know the origin is protected by Access
+		originReq, err := http.NewRequest(http.MethodGet, options.OriginURL, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		appInfo, err := token.GetAppInfo(originReq.URL)
+		if err != nil {
+			return nil, err
+		}
+		options.AppInfo = appInfo
+
 		wsConn, err = createAccessAuthenticatedStream(options, log)
 		if err != nil {
 			return nil, err
@@ -97,7 +108,7 @@ func createWebsocketStream(options *StartOptions, log *zerolog.Logger) (*cfwebso
 		return nil, err
 	}
 
-	return &cfwebsocket.Conn{Conn: wsConn}, nil
+	return &cfwebsocket.GorillaConn{Conn: wsConn}, nil
 }
 
 // createAccessAuthenticatedStream will try load a token from storage and make
@@ -117,11 +128,7 @@ func createAccessAuthenticatedStream(options *StartOptions, log *zerolog.Logger)
 	}
 
 	// Access Token is invalid for some reason. Go through regen flow
-	originReq, err := http.NewRequest(http.MethodGet, options.OriginURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	if err := token.RemoveTokenIfExists(originReq.URL); err != nil {
+	if err := token.RemoveTokenIfExists(options.AppInfo); err != nil {
 		return nil, err
 	}
 	wsConn, resp, err = createAccessWebSocketStream(options, log)

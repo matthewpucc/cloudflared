@@ -1,11 +1,13 @@
 package access
 
 import (
+	"crypto/tls"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/cloudflare/cloudflared/carrier"
-	"github.com/cloudflare/cloudflared/cmd/cloudflared/config"
+	"github.com/cloudflare/cloudflared/config"
 	"github.com/cloudflare/cloudflared/h2mux"
 	"github.com/cloudflare/cloudflared/logger"
 	"github.com/cloudflare/cloudflared/validation"
@@ -46,7 +48,7 @@ func StartForwarder(forwarder config.Forwarder, shutdown <-chan struct{}, log *z
 	}
 
 	// we could add a cmd line variable for this bool if we want the SOCK5 server to be on the client side
-	wsConn := carrier.NewWSConnection(log, false)
+	wsConn := carrier.NewWSConnection(log)
 
 	log.Info().Str(LogFieldHost, validURL.Host).Msg("Start Websocket listener")
 	return carrier.StartForwarder(wsConn, validURL.Host, shutdown, options)
@@ -84,10 +86,30 @@ func ssh(c *cli.Context) error {
 	options := &carrier.StartOptions{
 		OriginURL: originURL,
 		Headers:   headers,
+		Host:      hostname,
+	}
+
+	if connectTo := c.String(sshConnectTo); connectTo != "" {
+		parts := strings.Split(connectTo, ":")
+		switch len(parts) {
+		case 1:
+			options.OriginURL = fmt.Sprintf("https://%s", parts[0])
+		case 2:
+			options.OriginURL = fmt.Sprintf("https://%s:%s", parts[0], parts[1])
+		case 3:
+			options.OriginURL = fmt.Sprintf("https://%s:%s", parts[2], parts[1])
+			options.TLSClientConfig = &tls.Config{
+				InsecureSkipVerify: true,
+				ServerName:         parts[0],
+			}
+			log.Warn().Msgf("Using insecure SSL connection because SNI overridden to %s", parts[0])
+		default:
+			return fmt.Errorf("invalid connection override: %s", connectTo)
+		}
 	}
 
 	// we could add a cmd line variable for this bool if we want the SOCK5 server to be on the client side
-	wsConn := carrier.NewWSConnection(log, false)
+	wsConn := carrier.NewWSConnection(log)
 
 	if c.NArg() > 0 || c.IsSet(sshURLFlag) {
 		forwarder, err := config.ValidateUrl(c, true)
@@ -95,7 +117,6 @@ func ssh(c *cli.Context) error {
 			log.Err(err).Msg("Error validating origin URL")
 			return errors.Wrap(err, "error validating origin URL")
 		}
-
 		log.Info().Str(LogFieldHost, forwarder.Host).Msg("Start Websocket listener")
 		err = carrier.StartForwarder(wsConn, forwarder.Host, shutdownC, options)
 		if err != nil {

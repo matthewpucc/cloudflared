@@ -15,9 +15,10 @@ import (
 
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/buildinfo"
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
-	"github.com/cloudflare/cloudflared/cmd/cloudflared/config"
+	"github.com/cloudflare/cloudflared/cmd/cloudflared/proxydns"
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/ui"
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/updater"
+	"github.com/cloudflare/cloudflared/config"
 	"github.com/cloudflare/cloudflared/connection"
 	"github.com/cloudflare/cloudflared/ingress"
 	"github.com/cloudflare/cloudflared/logger"
@@ -104,7 +105,7 @@ func Commands() []*cli.Command {
 		buildDeleteCommand(),
 		buildCleanupCommand(),
 		// for compatibility, allow following as tunnel subcommands
-		tunneldns.Command(true),
+		proxydns.Command(true),
 		cliutil.RemovedCommand("db-connect"),
 	}
 
@@ -286,16 +287,14 @@ func StartServer(
 	}
 
 	// update needs to be after DNS proxy is up to resolve equinox server address
-	if updater.IsAutoupdateEnabled(c, log) {
-		autoupdateFreq := c.Duration("autoupdate-freq")
-		log.Info().Dur("autoupdateFreq", autoupdateFreq).Msg("Autoupdate frequency is set")
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			autoupdater := updater.NewAutoUpdater(c.Duration("autoupdate-freq"), &listeners, log)
-			errC <- autoupdater.Run(ctx)
-		}()
-	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		autoupdater := updater.NewAutoUpdater(
+			c.Bool("no-autoupdate"), c.Duration("autoupdate-freq"), &listeners, log,
+		)
+		errC <- autoupdater.Run(ctx)
+	}()
 
 	// Serve DNS proxy stand-alone if no hostname or tag or app is going to run
 	if dnsProxyStandAlone(c) {

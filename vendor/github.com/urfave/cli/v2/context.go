@@ -88,6 +88,7 @@ func (c *Context) IsSet(name string) bool {
 					if ff.IsSet() {
 						return true
 					}
+					break
 				}
 			}
 		}
