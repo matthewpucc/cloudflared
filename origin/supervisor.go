@@ -7,14 +7,15 @@ import (
 	"net"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+
 	"github.com/cloudflare/cloudflared/connection"
 	"github.com/cloudflare/cloudflared/edgediscovery"
 	"github.com/cloudflare/cloudflared/h2mux"
+	"github.com/cloudflare/cloudflared/retry"
 	"github.com/cloudflare/cloudflared/signal"
 	tunnelpogs "github.com/cloudflare/cloudflared/tunnelrpc/pogs"
-
-	"github.com/google/uuid"
-	"github.com/rs/zerolog"
 )
 
 const (
@@ -30,12 +31,6 @@ const (
 	refreshAuthMaxBackoff = 10
 	// Waiting time before retrying a failed 'Authenticate' connection
 	refreshAuthRetryDuration = time.Second * 10
-	// Maximum time to make an Authenticate RPC
-	authTokenTimeout = time.Second * 30
-)
-
-var (
-	errEventDigestUnset = errors.New("event digest unset")
 )
 
 // Supervisor manages non-declarative tunnels. Establishes TCP connections with the edge, and
@@ -118,10 +113,10 @@ func (s *Supervisor) Run(
 	var tunnelsWaiting []int
 	tunnelsActive := s.config.HAConnections
 
-	backoff := BackoffHandler{MaxRetries: s.config.Retries, BaseTime: tunnelRetryDuration, RetryForever: true}
+	backoff := retry.BackoffHandler{MaxRetries: s.config.Retries, BaseTime: tunnelRetryDuration, RetryForever: true}
 	var backoffTimer <-chan time.Time
 
-	refreshAuthBackoff := &BackoffHandler{MaxRetries: refreshAuthMaxBackoff, BaseTime: refreshAuthRetryDuration, RetryForever: true}
+	refreshAuthBackoff := &retry.BackoffHandler{MaxRetries: refreshAuthMaxBackoff, BaseTime: refreshAuthRetryDuration, RetryForever: true}
 	var refreshAuthBackoffTimer <-chan time.Time
 
 	if s.useReconnectToken {

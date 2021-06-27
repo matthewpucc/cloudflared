@@ -1,14 +1,14 @@
 package tunnel
 
 import (
-	"fmt"
 	"path/filepath"
 	"testing"
 
-	"github.com/cloudflare/cloudflared/tunnelstore"
 	"github.com/google/uuid"
-	"github.com/mitchellh/go-homedir"
+	homedir "github.com/mitchellh/go-homedir"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/cloudflare/cloudflared/tunnelstore"
 )
 
 func Test_fmtConnections(t *testing.T) {
@@ -94,7 +94,7 @@ func TestTunnelfilePath(t *testing.T) {
 	assert.NoError(t, err)
 	homeDir, err := homedir.Dir()
 	assert.NoError(t, err)
-	expected := fmt.Sprintf("%s/.cloudflared/%v.json", homeDir, tunnelID)
+	expected := filepath.Join(homeDir, ".cloudflared", tunnelID.String()+".json")
 	assert.Equal(t, expected, actual)
 }
 

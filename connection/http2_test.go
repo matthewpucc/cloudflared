@@ -12,15 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gobwas/ws/wsutil"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"golang.org/x/net/http2"
 
 	"github.com/cloudflare/cloudflared/tunnelrpc/pogs"
 	tunnelpogs "github.com/cloudflare/cloudflared/tunnelrpc/pogs"
-
-	"github.com/gobwas/ws/wsutil"
-	"github.com/rs/zerolog"
-	"github.com/stretchr/testify/require"
-	"golang.org/x/net/http2"
 )
 
 var (
@@ -104,9 +103,9 @@ func TestServeHTTP(t *testing.T) {
 			require.Equal(t, test.expectedBody, respBody)
 		}
 		if test.isProxyError {
-			require.Equal(t, responseMetaHeaderCfd, resp.Header.Get(ResponseMetaHeaderField))
+			require.Equal(t, responseMetaHeaderCfd, resp.Header.Get(ResponseMetaHeader))
 		} else {
-			require.Equal(t, responseMetaHeaderOrigin, resp.Header.Get(ResponseMetaHeaderField))
+			require.Equal(t, responseMetaHeaderOrigin, resp.Header.Get(ResponseMetaHeader))
 		}
 	}
 	cancel()
@@ -192,7 +191,7 @@ func TestServeWS(t *testing.T) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost:8080/ws", readPipe)
 	require.NoError(t, err)
-	req.Header.Set(internalUpgradeHeader, websocketUpgrade)
+	req.Header.Set(InternalUpgradeHeader, WebsocketUpgrade)
 
 	wg.Add(1)
 	go func() {
@@ -212,7 +211,7 @@ func TestServeWS(t *testing.T) {
 	resp := respWriter.Result()
 	// http2RespWriter should rewrite status 101 to 200
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Equal(t, responseMetaHeaderOrigin, resp.Header.Get(ResponseMetaHeaderField))
+	require.Equal(t, responseMetaHeaderOrigin, resp.Header.Get(ResponseMetaHeader))
 
 	wg.Wait()
 }
@@ -236,7 +235,7 @@ func TestServeControlStream(t *testing.T) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost:8080/", nil)
 	require.NoError(t, err)
-	req.Header.Set(internalUpgradeHeader, controlStreamUpgrade)
+	req.Header.Set(InternalUpgradeHeader, ControlStreamUpgrade)
 
 	edgeHTTP2Conn, err := testTransport.NewClientConn(edgeConn)
 	require.NoError(t, err)
@@ -275,7 +274,7 @@ func TestFailRegistration(t *testing.T) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost:8080/", nil)
 	require.NoError(t, err)
-	req.Header.Set(internalUpgradeHeader, controlStreamUpgrade)
+	req.Header.Set(InternalUpgradeHeader, ControlStreamUpgrade)
 
 	edgeHTTP2Conn, err := testTransport.NewClientConn(edgeConn)
 	require.NoError(t, err)
@@ -311,7 +310,7 @@ func TestGracefulShutdownHTTP2(t *testing.T) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost:8080/", nil)
 	require.NoError(t, err)
-	req.Header.Set(internalUpgradeHeader, controlStreamUpgrade)
+	req.Header.Set(InternalUpgradeHeader, ControlStreamUpgrade)
 
 	edgeHTTP2Conn, err := testTransport.NewClientConn(edgeConn)
 	require.NoError(t, err)

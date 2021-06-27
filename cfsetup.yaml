@@ -1,4 +1,4 @@
-pinned_go: &pinned_go go=1.15.7-1
+pinned_go: &pinned_go go=1.16.3-1
 pinned_go_fips: &pinned_go_fips go-fips=1.15.5-3
 
 build_dir: &build_dir /cfsetup_build
@@ -195,13 +195,15 @@ stretch: &stretch
       - *pinned_go_fips
       - build-essential
       - gotest-to-teamcity
+    pre-cache:
+      - go get golang.org/x/tools/cmd/goimports
+      - go get github.com/BurntSushi/go-sumtype
     post-cache:
       - export GOOS=linux
       - export GOARCH=amd64
       - export FIPS=true
-      # cd to a non-module directory: https://github.com/golang/go/issues/24250
-      - (cd / && go get github.com/BurntSushi/go-sumtype)
       - export PATH="$HOME/go/bin:$PATH"
+      - ./fmt-check.sh
       - make test | gotest-to-teamcity
   component-test:
     build_dir: *build_dir
@@ -218,9 +220,11 @@ stretch: &stretch
     pre-cache:
       - sudo pip3 install --upgrade -r component-tests/requirements.txt
     post-cache:
-      # Constructs config file from env vars
-      - python3 component-tests/config.py
+      # Creates and routes a Named Tunnel for this build. Also constructs config file from env vars.
+      - python3 component-tests/setup.py --type create
       - pytest component-tests
+      # The Named Tunnel is deleted and its route unprovisioned here.
+      - python3 component-tests/setup.py --type cleanup
   update-homebrew:
     builddeps:
       - openssh-client
@@ -275,8 +279,9 @@ centos-7:
       - https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
     pre-cache:
       - yum install -y fakeroot
-      - wget https://golang.org/dl/go1.15.7.linux-amd64.tar.gz -P /tmp/
-      - tar -C /usr/local -xzf /tmp/go1.15.7.linux-amd64.tar.gz
+      - yum upgrade -y binutils-2.27-44.base.el7.x86_64
+      - wget https://golang.org/dl/go1.16.3.linux-amd64.tar.gz -P /tmp/
+      - tar -C /usr/local -xzf /tmp/go1.16.3.linux-amd64.tar.gz
     post-cache:
       - export PATH=$PATH:/usr/local/go/bin
       - export GOOS=linux
@@ -287,8 +292,9 @@ centos-7:
     builddeps: *el7_builddeps
     pre-cache:
       - yum install -y fakeroot
-      - wget https://golang.org/dl/go1.15.7.linux-amd64.tar.gz -P /tmp/
-      - tar -C /usr/local -xzf /tmp/go1.15.7.linux-amd64.tar.gz
+      - yum upgrade -y binutils-2.27-44.base.el7.x86_64
+      - wget https://golang.org/dl/go1.16.3.linux-amd64.tar.gz -P /tmp/
+      - tar -C /usr/local -xzf /tmp/go1.16.3.linux-amd64.tar.gz
     post-cache:
       - export PATH=$PATH:/usr/local/go/bin
       - export GOOS=linux

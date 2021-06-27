@@ -3,24 +3,26 @@ package ingress
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/cloudflare/cloudflared/logger"
-	"github.com/cloudflare/cloudflared/socks"
 	"github.com/gobwas/ws/wsutil"
 	gorillaWS "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/proxy"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/cloudflare/cloudflared/logger"
+	"github.com/cloudflare/cloudflared/socks"
+	"github.com/cloudflare/cloudflared/websocket"
 )
 
 const (
@@ -156,7 +158,7 @@ func TestSocksStreamWSOverTCPConnection(t *testing.T) {
 			require.NoError(t, err)
 			defer wsForwarderInConn.Close()
 
-			Stream(wsForwarderInConn, &wsEyeball{wsForwarderOutConn}, testLogger)
+			websocket.Stream(wsForwarderInConn, &wsEyeball{wsForwarderOutConn}, testLogger)
 			return nil
 		})
 
@@ -191,18 +193,26 @@ func TestSocksStreamWSOverTCPConnection(t *testing.T) {
 func TestStreamWSConnection(t *testing.T) {
 	eyeballConn, edgeConn := net.Pipe()
 
-	origin := echoWSOrigin(t)
+	origin := echoWSOrigin(t, true)
 	defer origin.Close()
+
+	var svc httpService
+	err := svc.start(&sync.WaitGroup{}, testLogger, nil, nil, OriginRequestConfig{
+		NoTLSVerify: true,
+	})
+	require.NoError(t, err)
 
 	req, err := http.NewRequest(http.MethodGet, origin.URL, nil)
 	require.NoError(t, err)
 	req.Header.Set("Sec-Websocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
 
-	clientTLSConfig := &tls.Config{
-		InsecureSkipVerify: true,
-	}
-	wsConn, resp, err := newWSConnection(clientTLSConfig, req)
+	conn, resp, err := svc.newWebsocketProxyConnection(req)
+
 	require.NoError(t, err)
+	defer conn.Close()
+
 	require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
 	require.Equal(t, "Upgrade", resp.Header.Get("Connection"))
 	require.Equal(t, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", resp.Header.Get("Sec-Websocket-Accept"))
@@ -211,13 +221,37 @@ func TestStreamWSConnection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testStreamTimeout)
 	defer cancel()
 
+	connClosed := make(chan struct{})
+
 	errGroup, ctx := errgroup.WithContext(ctx)
 	errGroup.Go(func() error {
+		select {
+		case <-connClosed:
+		case <-ctx.Done():
+		}
+		if ctx.Err() == context.DeadlineExceeded {
+			eyeballConn.Close()
+			edgeConn.Close()
+			conn.Close()
+		}
+
+		return ctx.Err()
+	})
+
+	errGroup.Go(func() error {
 		echoWSEyeball(t, eyeballConn)
+		fmt.Println("closing pipe")
+		edgeConn.Close()
+		return eyeballConn.Close()
+	})
+
+	errGroup.Go(func() error {
+		defer conn.Close()
+		conn.Stream(ctx, edgeConn, testLogger)
+		close(connClosed)
 		return nil
 	})
 
-	wsConn.Stream(ctx, edgeConn, testLogger)
 	require.NoError(t, errGroup.Wait())
 }
 
@@ -239,17 +273,23 @@ func (wse *wsEyeball) Write(p []byte) (int, error) {
 }
 
 func echoWSEyeball(t *testing.T, conn net.Conn) {
-	require.NoError(t, wsutil.WriteClientBinary(conn, testMessage))
+	defer func() {
+		assert.NoError(t, conn.Close())
+	}()
+
+	if !assert.NoError(t, wsutil.WriteClientBinary(conn, testMessage)) {
+		return
+	}
 
 	readMsg, err := wsutil.ReadServerBinary(conn)
-	require.NoError(t, err)
+	if !assert.NoError(t, err) {
+		return
+	}
 
-	require.Equal(t, testResponse, readMsg)
-
-	require.NoError(t, conn.Close())
+	assert.Equal(t, testResponse, readMsg)
 }
 
-func echoWSOrigin(t *testing.T) *httptest.Server {
+func echoWSOrigin(t *testing.T, expectMessages bool) *httptest.Server {
 	var upgrader = gorillaWS.Upgrader{
 		ReadBufferSize:  10,
 		WriteBufferSize: 10,
@@ -266,12 +306,17 @@ func echoWSOrigin(t *testing.T) *httptest.Server {
 		require.NoError(t, err)
 		defer conn.Close()
 
+		sawMessage := false
 		for {
 			messageType, p, err := conn.ReadMessage()
 			if err != nil {
+				if expectMessages && !sawMessage {
+					t.Errorf("unexpected error: %v", err)
+				}
 				return
 			}
-			require.Equal(t, testMessage, p)
+			assert.Equal(t, testMessage, p)
+			sawMessage = true
 			if err := conn.WriteMessage(messageType, testResponse); err != nil {
 				return
 			}

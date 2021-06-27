@@ -6,10 +6,11 @@ import (
 	"os"
 	"text/tabwriter"
 
+	"github.com/pkg/errors"
+
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/updater"
 	"github.com/cloudflare/cloudflared/teamnet"
-	"github.com/pkg/errors"
 
 	"github.com/urfave/cli/v2"
 )
@@ -25,7 +26,7 @@ Cloudflare WARP client. You can also build rules to determine who can reach cert
 		Subcommands: []*cli.Command{
 			{
 				Name:      "add",
-				Action:    cliutil.ErrorHandler(addRouteCommand),
+				Action:    cliutil.ConfiguredAction(addRouteCommand),
 				Usage:     "Add any new network to the routing table reachable via the tunnel",
 				UsageText: "cloudflared tunnel [--config FILEPATH] route ip add [CIDR] [TUNNEL] [COMMENT?]",
 				Description: `Adds any network route space (represented as a CIDR) to your routing table.
@@ -38,7 +39,7 @@ reachable from the tunnel.`,
 			{
 				Name:        "show",
 				Aliases:     []string{"list"},
-				Action:      cliutil.ErrorHandler(showRoutesCommand),
+				Action:      cliutil.ConfiguredAction(showRoutesCommand),
 				Usage:       "Show the routing table",
 				UsageText:   "cloudflared tunnel [--config FILEPATH] route ip show [flags]",
 				Description: `Shows your organization private routing table. You can use flags to filter the results.`,
@@ -46,7 +47,7 @@ reachable from the tunnel.`,
 			},
 			{
 				Name:      "delete",
-				Action:    cliutil.ErrorHandler(deleteRouteCommand),
+				Action:    cliutil.ConfiguredAction(deleteRouteCommand),
 				Usage:     "Delete a row from your organization's private routing table",
 				UsageText: "cloudflared tunnel [--config FILEPATH] route ip delete [CIDR]",
 				Description: `Deletes the row for a given CIDR from your routing table. That portion
@@ -54,7 +55,7 @@ of your network will no longer be reachable by the WARP clients.`,
 			},
 			{
 				Name:      "get",
-				Action:    cliutil.ErrorHandler(getRouteByIPCommand),
+				Action:    cliutil.ConfiguredAction(getRouteByIPCommand),
 				Usage:     "Check which row of the routing table matches a given IP.",
 				UsageText: "cloudflared tunnel [--config FILEPATH] route ip get [IP]",
 				Description: `Checks which row of the routing table will be used to proxy a given IP.

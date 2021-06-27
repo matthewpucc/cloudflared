@@ -17,8 +17,9 @@ import (
 func Command(hidden bool) *cli.Command {
 	return &cli.Command{
 		Name:   "proxy-dns",
-		Action: cliutil.ErrorHandler(Run),
-		Usage:  "Run a DNS over HTTPS proxy server.",
+		Action: cliutil.ConfiguredAction(Run),
+
+		Usage: "Run a DNS over HTTPS proxy server.",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "metrics",
@@ -111,5 +112,3 @@ func Run(c *cli.Context) error {
 	}
 	return err
 }
-
-

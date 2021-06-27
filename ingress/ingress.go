@@ -9,12 +9,12 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cloudflare/cloudflared/config"
-	"github.com/cloudflare/cloudflared/ipaccess"
-
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	"github.com/urfave/cli/v2"
+
+	"github.com/cloudflare/cloudflared/config"
+	"github.com/cloudflare/cloudflared/ipaccess"
 )
 
 var (
@@ -136,6 +136,11 @@ func parseSingleOriginService(c *cli.Context, allowURLFromArgs bool) (originServ
 // IsEmpty checks if there are any ingress rules.
 func (ing Ingress) IsEmpty() bool {
 	return len(ing.Rules) == 0
+}
+
+// IsSingleRule checks if the user only specified a single ingress rule.
+func (ing Ingress) IsSingleRule() bool {
+	return len(ing.Rules) == 1
 }
 
 // StartOrigins will start any origin services managed by cloudflared, e.g. proxy servers or Hello World.

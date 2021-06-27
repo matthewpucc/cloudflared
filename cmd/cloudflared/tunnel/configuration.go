@@ -8,6 +8,13 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/google/uuid"
+	homedir "github.com/mitchellh/go-homedir"
+	"github.com/pkg/errors"
+	"github.com/rs/zerolog"
+	"github.com/urfave/cli/v2"
+	"golang.org/x/crypto/ssh/terminal"
+
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/buildinfo"
 	"github.com/cloudflare/cloudflared/config"
 	"github.com/cloudflare/cloudflared/connection"
@@ -18,13 +25,6 @@ import (
 	"github.com/cloudflare/cloudflared/tlsconfig"
 	tunnelpogs "github.com/cloudflare/cloudflared/tunnelrpc/pogs"
 	"github.com/cloudflare/cloudflared/validation"
-
-	"github.com/google/uuid"
-	"github.com/mitchellh/go-homedir"
-	"github.com/pkg/errors"
-	"github.com/rs/zerolog"
-	"github.com/urfave/cli/v2"
-	"golang.org/x/crypto/ssh/terminal"
 )
 
 const LogFieldOriginCertPath = "originCertPath"
@@ -85,8 +85,8 @@ func logClientOptions(c *cli.Context, log *zerolog.Logger) {
 	}
 }
 
-func dnsProxyStandAlone(c *cli.Context) bool {
-	return c.IsSet("proxy-dns") && (!c.IsSet("hostname") && !c.IsSet("tag") && !c.IsSet("hello-world"))
+func dnsProxyStandAlone(c *cli.Context, namedTunnel *connection.NamedTunnelConfig) bool {
+	return c.IsSet("proxy-dns") && (!c.IsSet("hostname") && !c.IsSet("tag") && !c.IsSet("hello-world") && namedTunnel == nil)
 }
 
 func findOriginCert(originCertPath string, log *zerolog.Logger) (string, error) {
@@ -199,9 +199,9 @@ func prepareTunnelConfig(
 	if isNamedTunnel {
 		clientUUID, err := uuid.NewRandom()
 		if err != nil {
-			return nil, ingress.Ingress{}, errors.Wrap(err, "can't generate clientUUID")
+			return nil, ingress.Ingress{}, errors.Wrap(err, "can't generate connector UUID")
 		}
-		log.Info().Msgf("Generated Client ID: %s", clientUUID)
+		log.Info().Msgf("Generated Connector ID: %s", clientUUID)
 		features := append(c.StringSlice("features"), origin.FeatureSerializedHeaders)
 		namedTunnel.Client = tunnelpogs.ClientInfo{
 			ClientID: clientUUID[:],

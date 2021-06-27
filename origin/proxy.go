@@ -18,7 +18,10 @@ import (
 )
 
 const (
-	TagHeaderNamePrefix = "Cf-Warp-Tag-"
+	TagHeaderNamePrefix   = "Cf-Warp-Tag-"
+	LogFieldCFRay         = "cfRay"
+	LogFieldRule          = "ingressRule"
+	LogFieldOriginService = "originService"
 )
 
 type proxy struct {
@@ -67,8 +70,8 @@ func (p *proxy) Proxy(w connection.ResponseWriter, req *http.Request, sourceConn
 			lbProbe: lbProbe,
 			rule:    ingress.ServiceWarpRouting,
 		}
-		if err := p.proxyStreamRequest(serveCtx, w, req, sourceConnectionType, p.warpRouting.Proxy, logFields); err != nil {
-			p.logRequestError(err, cfRay, ingress.ServiceWarpRouting)
+		if err := p.proxyStreamRequest(serveCtx, w, req, p.warpRouting.Proxy, logFields); err != nil {
+			p.logRequestError(err, cfRay, "", ingress.ServiceWarpRouting)
 			return err
 		}
 		return nil
@@ -84,7 +87,8 @@ func (p *proxy) Proxy(w connection.ResponseWriter, req *http.Request, sourceConn
 
 	if sourceConnectionType == connection.TypeHTTP {
 		if err := p.proxyHTTPRequest(w, req, rule, logFields); err != nil {
-			p.logRequestError(err, cfRay, ruleNum)
+			rule, srv := ruleField(p.ingressRules, ruleNum)
+			p.logRequestError(err, cfRay, rule, srv)
 			return err
 		}
 		return nil
@@ -96,11 +100,20 @@ func (p *proxy) Proxy(w connection.ResponseWriter, req *http.Request, sourceConn
 		return fmt.Errorf("Not a connection-oriented service")
 	}
 
-	if err := p.proxyStreamRequest(serveCtx, w, req, sourceConnectionType, connectionProxy, logFields); err != nil {
-		p.logRequestError(err, cfRay, ruleNum)
+	if err := p.proxyStreamRequest(serveCtx, w, req, connectionProxy, logFields); err != nil {
+		rule, srv := ruleField(p.ingressRules, ruleNum)
+		p.logRequestError(err, cfRay, rule, srv)
 		return err
 	}
 	return nil
+}
+
+func ruleField(ing ingress.Ingress, ruleNum int) (ruleID string, srv string) {
+	srv = ing.Rules[ruleNum].Service.String()
+	if ing.IsSingleRule() {
+		return "", srv
+	}
+	return fmt.Sprintf("%d", ruleNum), srv
 }
 
 func (p *proxy) proxyHTTPRequest(w connection.ResponseWriter, req *http.Request, rule *ingress.Rule, fields logFields) error {
@@ -124,7 +137,7 @@ func (p *proxy) proxyHTTPRequest(w connection.ResponseWriter, req *http.Request,
 
 	resp, err := httpService.RoundTrip(req)
 	if err != nil {
-		return errors.Wrap(err, "Error proxying request to origin")
+		return errors.Wrap(err, "Unable to reach the origin service. The service may be down or it may not be responding to traffic from cloudflared")
 	}
 	defer resp.Body.Close()
 
@@ -152,7 +165,6 @@ func (p *proxy) proxyStreamRequest(
 	serveCtx context.Context,
 	w connection.ResponseWriter,
 	req *http.Request,
-	sourceConnectionType connection.Type,
 	connectionProxy ingress.StreamBasedOriginProxy,
 	fields logFields,
 ) error {
@@ -230,8 +242,13 @@ func (p *proxy) logRequest(r *http.Request, fields logFields) {
 	} else {
 		p.log.Debug().Msgf("All requests should have a CF-RAY header. Please open a support ticket with Cloudflare. %s %s %s ", r.Method, r.URL, r.Proto)
 	}
-	p.log.Debug().Msgf("CF-RAY: %s Request Headers %+v", fields.cfRay, r.Header)
-	p.log.Debug().Msgf("CF-RAY: %s Serving with ingress rule %v", fields.cfRay, fields.rule)
+	p.log.Debug().
+		Str("CF-RAY", fields.cfRay).
+		Str("Header", fmt.Sprintf("%+v", r.Header)).
+		Str("host", r.Host).
+		Str("path", r.URL.Path).
+		Interface("rule", fields.rule).
+		Msg("Inbound request")
 
 	if contentLen := r.ContentLength; contentLen == -1 {
 		p.log.Debug().Msgf("CF-RAY: %s Request Content length unknown", fields.cfRay)
@@ -258,13 +275,19 @@ func (p *proxy) logOriginResponse(resp *http.Response, fields logFields) {
 	}
 }
 
-func (p *proxy) logRequestError(err error, cfRay string, rule interface{}) {
+func (p *proxy) logRequestError(err error, cfRay string, rule, service string) {
 	requestErrors.Inc()
+	log := p.log.Error().Err(err)
 	if cfRay != "" {
-		p.log.Error().Msgf("CF-RAY: %s Proxying to ingress %v error: %v", cfRay, rule, err)
-	} else {
-		p.log.Error().Msgf("Proxying to ingress %v error: %v", rule, err)
+		log = log.Str(LogFieldCFRay, cfRay)
 	}
+	if rule != "" {
+		log = log.Str(LogFieldRule, rule)
+	}
+	if service != "" {
+		log = log.Str(LogFieldOriginService, service)
+	}
+	log.Msg("")
 }
 
 func findCfRayHeader(req *http.Request) string {

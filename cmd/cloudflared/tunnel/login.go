@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/mitchellh/go-homedir"
+	homedir "github.com/mitchellh/go-homedir"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli/v2"
 
@@ -20,22 +20,16 @@ import (
 
 const (
 	baseLoginURL     = "https://dash.cloudflare.com/argotunnel"
-	callbackStoreURL = "https://login.argotunnel.com/"
+	callbackStoreURL = "https://login.cloudflareaccess.org/"
 )
 
 func buildLoginSubcommand(hidden bool) *cli.Command {
 	return &cli.Command{
 		Name:      "login",
-		Action:    cliutil.ErrorHandler(login),
+		Action:    cliutil.ConfiguredAction(login),
 		Usage:     "Generate a configuration file with your login details",
 		ArgsUsage: " ",
-		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:   "url",
-				Hidden: true,
-			},
-		},
-		Hidden: hidden,
+		Hidden:    hidden,
 	}
 }
 

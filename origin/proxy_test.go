@@ -6,27 +6,29 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/cloudflare/cloudflared/logger"
+	"github.com/gobwas/ws/wsutil"
+	gorillaWS "github.com/gorilla/websocket"
+	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/urfave/cli/v2"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/cloudflare/cloudflared/config"
 	"github.com/cloudflare/cloudflared/connection"
 	"github.com/cloudflare/cloudflared/hello"
 	"github.com/cloudflare/cloudflared/ingress"
+	"github.com/cloudflare/cloudflared/logger"
 	tunnelpogs "github.com/cloudflare/cloudflared/tunnelrpc/pogs"
-	gorillaWS "github.com/gorilla/websocket"
-	"github.com/urfave/cli/v2"
-
-	"github.com/gobwas/ws/wsutil"
-	"github.com/rs/zerolog"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -80,6 +82,11 @@ func (w *mockWSRespWriter) respBody() io.ReadWriter {
 	return bytes.NewBuffer(data)
 }
 
+func (w *mockWSRespWriter) Close() error {
+	close(w.writeNotification)
+	return nil
+}
+
 func (w *mockWSRespWriter) Read(data []byte) (int, error) {
 	return w.reader.Read(data)
 }
@@ -126,14 +133,14 @@ func TestProxySingleOrigin(t *testing.T) {
 	require.NoError(t, ingressRule.StartOrigins(&wg, &log, ctx.Done(), errC))
 
 	proxy := NewOriginProxy(ingressRule, unusedWarpRoutingService, testTags, &log)
-	t.Run("testProxyHTTP", testProxyHTTP(t, proxy))
-	t.Run("testProxyWebsocket", testProxyWebsocket(t, proxy))
-	t.Run("testProxySSE", testProxySSE(t, proxy))
+	t.Run("testProxyHTTP", testProxyHTTP(proxy))
+	t.Run("testProxyWebsocket", testProxyWebsocket(proxy))
+	t.Run("testProxySSE", testProxySSE(proxy))
 	cancel()
 	wg.Wait()
 }
 
-func testProxyHTTP(t *testing.T, proxy connection.OriginProxy) func(t *testing.T) {
+func testProxyHTTP(proxy connection.OriginProxy) func(t *testing.T) {
 	return func(t *testing.T) {
 		responseWriter := newMockHTTPRespWriter()
 		req, err := http.NewRequest(http.MethodGet, "http://localhost:8080", nil)
@@ -146,23 +153,43 @@ func testProxyHTTP(t *testing.T, proxy connection.OriginProxy) func(t *testing.T
 	}
 }
 
-func testProxyWebsocket(t *testing.T, proxy connection.OriginProxy) func(t *testing.T) {
+func testProxyWebsocket(proxy connection.OriginProxy) func(t *testing.T) {
 	return func(t *testing.T) {
 		// WSRoute is a websocket echo handler
-		ctx, cancel := context.WithCancel(context.Background())
+		const testTimeout = 5 * time.Second * 1000
+		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+		defer cancel()
 		readPipe, writePipe := io.Pipe()
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://localhost:8080%s", hello.WSRoute), readPipe)
-		responseWriter := newMockWSRespWriter(readPipe)
+		req.Header.Set("Sec-Websocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Upgrade", "websocket")
+		responseWriter := newMockWSRespWriter(nil)
 
-		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		finished := make(chan struct{})
+
+		errGroup, ctx := errgroup.WithContext(ctx)
+		errGroup.Go(func() error {
 			err = proxy.Proxy(responseWriter, req, connection.TypeWebsocket)
 			require.NoError(t, err)
 
 			require.Equal(t, http.StatusSwitchingProtocols, responseWriter.Code)
-		}()
+			return nil
+		})
+
+		errGroup.Go(func() error {
+			select {
+			case <-finished:
+			case <-ctx.Done():
+			}
+			if ctx.Err() == context.DeadlineExceeded {
+				t.Errorf("Test timed out")
+				readPipe.Close()
+				writePipe.Close()
+				responseWriter.Close()
+			}
+			return nil
+		})
 
 		msg := []byte("test websocket")
 		err = wsutil.WriteClientText(writePipe, msg)
@@ -180,12 +207,16 @@ func testProxyWebsocket(t *testing.T, proxy connection.OriginProxy) func(t *test
 		require.NoError(t, err)
 		require.Equal(t, msg, returnedMsg)
 
-		cancel()
-		wg.Wait()
+		_ = readPipe.Close()
+		_ = writePipe.Close()
+		_ = responseWriter.Close()
+
+		close(finished)
+		errGroup.Wait()
 	}
 }
 
-func testProxySSE(t *testing.T, proxy connection.OriginProxy) func(t *testing.T) {
+func testProxySSE(proxy connection.OriginProxy) func(t *testing.T) {
 	return func(t *testing.T) {
 		var (
 			pushCount = 50
@@ -244,26 +275,7 @@ func TestProxyMultipleOrigins(t *testing.T) {
 		},
 	}
 
-	ingress, err := ingress.ParseIngress(&config.Configuration{
-		TunnelID: t.Name(),
-		Ingress:  unvalidatedIngress,
-	})
-	require.NoError(t, err)
-
-	log := zerolog.Nop()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	errC := make(chan error)
-	var wg sync.WaitGroup
-	require.NoError(t, ingress.StartOrigins(&wg, &log, ctx.Done(), errC))
-
-	proxy := NewOriginProxy(ingress, unusedWarpRoutingService, testTags, &log)
-
-	tests := []struct {
-		url            string
-		expectedStatus int
-		expectedBody   []byte
-	}{
+	tests := []MultipleIngressTest{
 		{
 			url:            "http://api.example.com",
 			expectedStatus: http.StatusCreated,
@@ -287,6 +299,31 @@ func TestProxyMultipleOrigins(t *testing.T) {
 			expectedStatus: http.StatusNotFound,
 		},
 	}
+
+	runIngressTestScenarios(t, unvalidatedIngress, tests)
+}
+
+type MultipleIngressTest struct {
+	url            string
+	expectedStatus int
+	expectedBody   []byte
+}
+
+func runIngressTestScenarios(t *testing.T, unvalidatedIngress []config.UnvalidatedIngressRule, tests []MultipleIngressTest) {
+	ingress, err := ingress.ParseIngress(&config.Configuration{
+		TunnelID: t.Name(),
+		Ingress:  unvalidatedIngress,
+	})
+	require.NoError(t, err)
+
+	log := zerolog.Nop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errC := make(chan error)
+	var wg sync.WaitGroup
+	require.NoError(t, ingress.StartOrigins(&wg, &log, ctx.Done(), errC))
+
+	proxy := NewOriginProxy(ingress, unusedWarpRoutingService, testTags, &log)
 
 	for _, test := range tests {
 		responseWriter := newMockHTTPRespWriter()
@@ -602,6 +639,45 @@ func TestConnections(t *testing.T) {
 			replayer.rw.Reset()
 		})
 	}
+}
+
+func TestUnixSocketOrigin(t *testing.T) {
+	file, err := ioutil.TempFile("", "unix.sock")
+	require.NoError(t, err)
+	os.Remove(file.Name()) // remove the file since binding the socket expects to create it
+
+	l, err := net.Listen("unix", file.Name())
+	require.NoError(t, err)
+	defer l.Close()
+	defer os.Remove(file.Name())
+
+	api := &httptest.Server{
+		Listener: l,
+		Config:   &http.Server{Handler: mockAPI{}},
+	}
+	api.Start()
+	defer api.Close()
+
+	unvalidatedIngress := []config.UnvalidatedIngressRule{
+		{
+			Hostname: "unix.example.com",
+			Service:  "unix:" + file.Name(),
+		},
+		{
+			Hostname: "*",
+			Service:  "http_status:404",
+		},
+	}
+
+	tests := []MultipleIngressTest{
+		{
+			url:            "http://unix.example.com",
+			expectedStatus: http.StatusCreated,
+			expectedBody:   []byte("Created"),
+		},
+	}
+
+	runIngressTestScenarios(t, unvalidatedIngress, tests)
 }
 
 type requestBody struct {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
@@ -147,7 +148,7 @@ func (sc *subcommandContext) readTunnelCredentials(credFinder CredFinder) (conne
 	return credentials, nil
 }
 
-func (sc *subcommandContext) create(name string, credentialsOutputPath string) (*tunnelstore.Tunnel, error) {
+func (sc *subcommandContext) create(name string, credentialsFilePath string) (*tunnelstore.Tunnel, error) {
 	client, err := sc.client()
 	if err != nil {
 		return nil, errors.Wrap(err, "couldn't create client to talk to Argo Tunnel backend")
@@ -173,27 +174,40 @@ func (sc *subcommandContext) create(name string, credentialsOutputPath string) (
 		TunnelID:     tunnel.ID,
 		TunnelName:   name,
 	}
-	filePath, writeFileErr := writeTunnelCredentials(credential.certPath, credentialsOutputPath, &tunnelCredentials)
+	usedCertPath := false
+	if credentialsFilePath == "" {
+		originCertDir := filepath.Dir(credential.certPath)
+		credentialsFilePath, err = tunnelFilePath(tunnelCredentials.TunnelID, originCertDir)
+		if err != nil {
+			return nil, err
+		}
+		usedCertPath = true
+	}
+	writeFileErr := writeTunnelCredentials(credentialsFilePath, &tunnelCredentials)
 	if writeFileErr != nil {
 		var errorLines []string
-		errorLines = append(errorLines, fmt.Sprintf("Your tunnel '%v' was created with ID %v. However, cloudflared couldn't write to the tunnel credentials file at %v.json.", tunnel.Name, tunnel.ID, tunnel.ID))
+		errorLines = append(errorLines, fmt.Sprintf("Your tunnel '%v' was created with ID %v. However, cloudflared couldn't write tunnel credentials to %s.", tunnel.Name, tunnel.ID, credentialsFilePath))
 		errorLines = append(errorLines, fmt.Sprintf("The file-writing error is: %v", writeFileErr))
 		if deleteErr := client.DeleteTunnel(tunnel.ID); deleteErr != nil {
 			errorLines = append(errorLines, fmt.Sprintf("Cloudflared tried to delete the tunnel for you, but encountered an error. You should use `cloudflared tunnel delete %v` to delete the tunnel yourself, because the tunnel can't be run without the tunnelfile.", tunnel.ID))
 			errorLines = append(errorLines, fmt.Sprintf("The delete tunnel error is: %v", deleteErr))
 		} else {
-			errorLines = append(errorLines, fmt.Sprintf("The tunnel was deleted, because the tunnel can't be run without the tunnelfile"))
+			errorLines = append(errorLines, fmt.Sprintf("The tunnel was deleted, because the tunnel can't be run without the credentials file"))
 		}
 		errorMsg := strings.Join(errorLines, "\n")
 		return nil, errors.New(errorMsg)
 	}
-	sc.log.Info().Msgf("Tunnel credentials written to %v. cloudflared chose this file based on where your origin certificate was found. Keep this file secret. To revoke these credentials, delete the tunnel.", filePath)
 
 	if outputFormat := sc.c.String(outputFormatFlag.Name); outputFormat != "" {
 		return nil, renderOutput(outputFormat, &tunnel)
 	}
 
-	sc.log.Info().Msgf("Created tunnel %s with id %s", tunnel.Name, tunnel.ID)
+	fmt.Printf("Tunnel credentials written to %v.", credentialsFilePath)
+	if usedCertPath {
+		fmt.Print(" cloudflared chose this file based on where your origin certificate was found.")
+	}
+	fmt.Println(" Keep this file secret. To revoke these credentials, delete the tunnel.")
+	fmt.Printf("\nCreated tunnel %s with id %s\n", tunnel.Name, tunnel.ID)
 	return tunnel, nil
 }
 
@@ -224,7 +238,7 @@ func (sc *subcommandContext) delete(tunnelIDs []uuid.UUID) error {
 			return fmt.Errorf("Tunnel %s has already been deleted", tunnel.ID)
 		}
 		if forceFlagSet {
-			if err := client.CleanupConnections(tunnel.ID); err != nil {
+			if err := client.CleanupConnections(tunnel.ID, tunnelstore.NewCleanupParams()); err != nil {
 				return errors.Wrapf(err, "Error cleaning up connections for tunnel %s", tunnel.ID)
 			}
 		}
@@ -276,13 +290,24 @@ func (sc *subcommandContext) run(tunnelID uuid.UUID) error {
 }
 
 func (sc *subcommandContext) cleanupConnections(tunnelIDs []uuid.UUID) error {
+	params := tunnelstore.NewCleanupParams()
+	extraLog := ""
+	if connector := sc.c.String("connector-id"); connector != "" {
+		connectorID, err := uuid.Parse(connector)
+		if err != nil {
+			return errors.Wrapf(err, "%s is not a valid client ID (must be a UUID)", connector)
+		}
+		params.ForClient(connectorID)
+		extraLog = fmt.Sprintf(" for connector-id %s", connectorID.String())
+	}
+
 	client, err := sc.client()
 	if err != nil {
 		return err
 	}
 	for _, tunnelID := range tunnelIDs {
-		sc.log.Info().Msgf("Cleanup connection for tunnel %s", tunnelID)
-		if err := client.CleanupConnections(tunnelID); err != nil {
+		sc.log.Info().Msgf("Cleanup connection for tunnel %s%s", tunnelID, extraLog)
+		if err := client.CleanupConnections(tunnelID, params); err != nil {
 			sc.log.Error().Msgf("Error cleaning up connections for tunnel %v, error :%v", tunnelID, err)
 		}
 	}
@@ -343,6 +368,12 @@ func (sc *subcommandContext) findID(input string) (uuid.UUID, error) {
 // one Tunnelstore API call.
 func (sc *subcommandContext) findIDs(inputs []string) ([]uuid.UUID, error) {
 
+	// Shortcut without Tunnelstore call if we find that all inputs are already UUIDs.
+	uuids, err := convertNamesToUuids(inputs, make(map[string]uuid.UUID))
+	if err == nil {
+		return uuids, nil
+	}
+
 	// First, look up all tunnels the user has
 	filter := tunnelstore.NewFilter()
 	filter.NoDeleted()
@@ -362,7 +393,10 @@ func findIDs(tunnels []*tunnelstore.Tunnel, inputs []string) ([]uuid.UUID, error
 		nameToID[tunnel.Name] = tunnel.ID
 	}
 
-	// For each input, try to find the tunnel ID.
+	return convertNamesToUuids(inputs, nameToID)
+}
+
+func convertNamesToUuids(inputs []string, nameToID map[string]uuid.UUID) ([]uuid.UUID, error) {
 	tunnelIDs := make([]uuid.UUID, len(inputs))
 	var badInputs []string
 	for i, input := range inputs {

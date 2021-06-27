@@ -12,10 +12,6 @@ import (
 	"golang.org/x/net/http2"
 )
 
-const (
-	CloudflaredProxyTunnelHostnameHeader = "cf-cloudflared-proxy-tunnel-hostname"
-)
-
 type MuxReader struct {
 	// f is used to read HTTP2 frames.
 	f *http2.Framer
@@ -73,12 +69,13 @@ func (r *MuxReader) run(log *zerolog.Logger) error {
 
 	// routine to periodically update bytesRead
 	go func() {
-		tickC := time.Tick(updateFreq)
+		ticker := time.NewTicker(updateFreq)
+		defer ticker.Stop()
 		for {
 			select {
 			case <-r.abortChan:
 				return
-			case <-tickC:
+			case <-ticker.C:
 				r.metricsUpdater.updateInBoundBytes(r.bytesRead.Count())
 			}
 		}
@@ -252,8 +249,6 @@ func (r *MuxReader) receiveHeaderData(frame *http2.MetaHeadersFrame) error {
 			if r.dictionaries.write != nil {
 				continue
 			}
-		case CloudflaredProxyTunnelHostnameHeader:
-			stream.tunnelHostname = TunnelHostname(header.Value)
 		}
 		headers = append(headers, Header{Name: header.Name, Value: header.Value})
 	}

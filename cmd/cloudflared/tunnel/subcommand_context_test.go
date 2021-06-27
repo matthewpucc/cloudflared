@@ -4,16 +4,17 @@ import (
 	"encoding/base64"
 	"flag"
 	"fmt"
-	"github.com/rs/zerolog"
 	"reflect"
 	"testing"
 	"time"
 
-	"github.com/cloudflare/cloudflared/connection"
-	"github.com/cloudflare/cloudflared/tunnelstore"
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
+	"github.com/rs/zerolog"
 	"github.com/urfave/cli/v2"
+
+	"github.com/cloudflare/cloudflared/connection"
+	"github.com/cloudflare/cloudflared/tunnelstore"
 )
 
 func Test_findIDs(t *testing.T) {
@@ -260,7 +261,7 @@ func (d *deleteMockTunnelStore) DeleteTunnel(tunnelID uuid.UUID) error {
 	return nil
 }
 
-func (d *deleteMockTunnelStore) CleanupConnections(tunnelID uuid.UUID) error {
+func (d *deleteMockTunnelStore) CleanupConnections(tunnelID uuid.UUID, _ *tunnelstore.CleanupParams) error {
 	tunnel, ok := d.mockTunnels[tunnelID]
 	if !ok {
 		return fmt.Errorf("Couldn't find tunnel: %v", tunnelID)

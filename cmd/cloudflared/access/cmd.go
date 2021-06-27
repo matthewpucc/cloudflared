@@ -11,19 +11,18 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/cloudflare/cloudflared/carrier"
-	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
-	"github.com/cloudflare/cloudflared/h2mux"
-	"github.com/cloudflare/cloudflared/logger"
-	"github.com/cloudflare/cloudflared/sshgen"
-	"github.com/cloudflare/cloudflared/token"
-	"github.com/cloudflare/cloudflared/validation"
-
 	"github.com/getsentry/raven-go"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/net/idna"
+
+	"github.com/cloudflare/cloudflared/carrier"
+	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
+	"github.com/cloudflare/cloudflared/logger"
+	"github.com/cloudflare/cloudflared/sshgen"
+	"github.com/cloudflare/cloudflared/token"
+	"github.com/cloudflare/cloudflared/validation"
 )
 
 const (
@@ -40,7 +39,7 @@ Add to your {{.Home}}/.ssh/config:
 
 Host {{.Hostname}}
 {{- if .ShortLivedCerts}}
-  ProxyCommand bash -c '{{.Cloudflared}} access ssh-gen --hostname %h; ssh -tt %r@cfpipe-{{.Hostname}} >&2 <&1' 
+  ProxyCommand bash -c '{{.Cloudflared}} access ssh-gen --hostname %h; ssh -tt %r@cfpipe-{{.Hostname}} >&2 <&1'
 
 Host cfpipe-{{.Hostname}}
   HostName {{.Hostname}}
@@ -77,30 +76,24 @@ func Commands() []*cli.Command {
 			Aliases:  []string{"forward"},
 			Category: "Access",
 			Usage:    "access <subcommand>",
-			Description: `Cloudflare Access protects internal resources by securing, authenticating and monitoring access 
-			per-user and by application. With Cloudflare Access, only authenticated users with the required permissions are 
-			able to reach sensitive resources. The commands provided here allow you to interact with Access protected 
+			Description: `Cloudflare Access protects internal resources by securing, authenticating and monitoring access
+			per-user and by application. With Cloudflare Access, only authenticated users with the required permissions are
+			able to reach sensitive resources. The commands provided here allow you to interact with Access protected
 			applications from the command line.`,
 			Subcommands: []*cli.Command{
 				{
 					Name:   "login",
-					Action: cliutil.ErrorHandler(login),
+					Action: cliutil.Action(login),
 					Usage:  "login <url of access application>",
 					Description: `The login subcommand initiates an authentication flow with your identity provider.
 					The subcommand will launch a browser. For headless systems, a url is provided.
 					Once authenticated with your identity provider, the login command will generate a JSON Web Token (JWT)
-					scoped to your identity, the application you intend to reach, and valid for a session duration set by your 
+					scoped to your identity, the application you intend to reach, and valid for a session duration set by your
 					administrator. cloudflared stores the token in local storage.`,
-					Flags: []cli.Flag{
-						&cli.StringFlag{
-							Name:   "url",
-							Hidden: true,
-						},
-					},
 				},
 				{
 					Name:   "curl",
-					Action: cliutil.ErrorHandler(curl),
+					Action: cliutil.Action(curl),
 					Usage:  "curl [--allow-request, -ar] <url> [<curl args>...]",
 					Description: `The curl subcommand wraps curl and automatically injects the JWT into a cf-access-token
 					header when using curl to reach an application behind Access.`,
@@ -109,7 +102,7 @@ func Commands() []*cli.Command {
 				},
 				{
 					Name:        "token",
-					Action:      cliutil.ErrorHandler(generateToken),
+					Action:      cliutil.Action(generateToken),
 					Usage:       "token -app=<url of access application>",
 					ArgsUsage:   "url of Access application",
 					Description: `The token subcommand produces a JWT which can be used to authenticate requests.`,
@@ -121,7 +114,7 @@ func Commands() []*cli.Command {
 				},
 				{
 					Name:        "tcp",
-					Action:      cliutil.ErrorHandler(ssh),
+					Action:      cliutil.Action(ssh),
 					Aliases:     []string{"rdp", "ssh", "smb"},
 					Usage:       "",
 					ArgsUsage:   "",
@@ -164,7 +157,7 @@ func Commands() []*cli.Command {
 						&cli.StringFlag{
 							Name:    logger.LogSSHLevelFlag,
 							Aliases: []string{"loglevel"}, //added to match the tunnel side
-							Usage:   "Application logging level {fatal, error, info, debug}. ",
+							Usage:   "Application logging level {debug, info, warn, error, fatal}. ",
 						},
 						&cli.StringFlag{
 							Name:   sshConnectTo,
@@ -175,7 +168,7 @@ func Commands() []*cli.Command {
 				},
 				{
 					Name:        "ssh-config",
-					Action:      cliutil.ErrorHandler(sshConfig),
+					Action:      cliutil.Action(sshConfig),
 					Usage:       "",
 					Description: `Prints an example configuration ~/.ssh/config`,
 					Flags: []cli.Flag{
@@ -191,7 +184,7 @@ func Commands() []*cli.Command {
 				},
 				{
 					Name:        "ssh-gen",
-					Action:      cliutil.ErrorHandler(sshGen),
+					Action:      cliutil.Action(sshGen),
 					Usage:       "",
 					Description: `Generates a short lived certificate for given hostname`,
 					Flags: []cli.Flag{
@@ -292,10 +285,9 @@ func curl(c *cli.Context) error {
 	}
 
 	cmdArgs = append(cmdArgs, "-H")
-	cmdArgs = append(cmdArgs, fmt.Sprintf("%s: %s", h2mux.CFAccessTokenHeader, tok))
+	cmdArgs = append(cmdArgs, fmt.Sprintf("%s: %s", carrier.CFAccessTokenHeader, tok))
 	return run("curl", cmdArgs...)
 }
-
 
 // run kicks off a shell task and pipe the results to the respective std pipes
 func run(cmd string, args ...string) error {
@@ -323,7 +315,7 @@ func generateToken(c *cli.Context) error {
 	if err := raven.SetDSN(sentryDSN); err != nil {
 		return err
 	}
-	appURL, err := url.Parse(c.String("app"))
+	appURL, err := url.Parse(ensureURLScheme(c.String("app")))
 	if err != nil || c.NumFlags() < 1 {
 		fmt.Fprintln(os.Stderr, "Please provide a url.")
 		return err
@@ -394,7 +386,7 @@ func sshGen(c *cli.Context) error {
 		return err
 	}
 
-	if err := sshgen.GenerateShortLivedCertificate(appInfo, cfdToken); err != nil {
+	if err := sshgen.GenerateShortLivedCertificate(originURL, cfdToken); err != nil {
 		return err
 	}
 
@@ -479,10 +471,10 @@ func isFileThere(candidate string) bool {
 func verifyTokenAtEdge(appUrl *url.URL, appInfo *token.AppInfo, c *cli.Context, log *zerolog.Logger) error {
 	headers := buildRequestHeaders(c.StringSlice(sshHeaderFlag))
 	if c.IsSet(sshTokenIDFlag) {
-		headers.Add(h2mux.CFAccessClientIDHeader, c.String(sshTokenIDFlag))
+		headers.Add(cfAccessClientIDHeader, c.String(sshTokenIDFlag))
 	}
 	if c.IsSet(sshTokenSecretFlag) {
-		headers.Add(h2mux.CFAccessClientSecretHeader, c.String(sshTokenSecretFlag))
+		headers.Add(cfAccessClientSecretHeader, c.String(sshTokenSecretFlag))
 	}
 	options := &carrier.StartOptions{AppInfo: appInfo, OriginURL: appUrl.String(), Headers: headers}
 

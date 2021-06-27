@@ -7,11 +7,19 @@ import (
 	"io/ioutil"
 	"net/url"
 	"os"
-	"reflect"
 	"runtime/trace"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/coreos/go-systemd/daemon"
+	"github.com/facebookgo/grace/gracenet"
+	"github.com/getsentry/raven-go"
+	homedir "github.com/mitchellh/go-homedir"
+	"github.com/pkg/errors"
+	"github.com/rs/zerolog"
+	"github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v2/altsrc"
 
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/buildinfo"
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
@@ -28,15 +36,6 @@ import (
 	"github.com/cloudflare/cloudflared/tlsconfig"
 	"github.com/cloudflare/cloudflared/tunneldns"
 	"github.com/cloudflare/cloudflared/tunnelstore"
-
-	"github.com/coreos/go-systemd/daemon"
-	"github.com/facebookgo/grace/gracenet"
-	"github.com/getsentry/raven-go"
-	"github.com/mitchellh/go-homedir"
-	"github.com/pkg/errors"
-	"github.com/rs/zerolog"
-	"github.com/urfave/cli/v2"
-	"github.com/urfave/cli/v2/altsrc"
 )
 
 const (
@@ -75,8 +74,8 @@ const (
 	// uiFlag is to enable launching cloudflared in interactive UI mode
 	uiFlag = "ui"
 
-	debugLevelWarning = "At debug level, request URL, method, protocol, content legnth and header will be logged. " +
-		"Response status, content length and header will also be logged in debug level."
+	debugLevelWarning = "At debug level cloudflared will log request URL, method, protocol, content length, as well as, all request and response headers. " +
+		"This can expose sensitive information in your logs."
 
 	LogFieldCommand             = "command"
 	LogFieldExpandedPath        = "expandedPath"
@@ -88,6 +87,10 @@ const (
 var (
 	graceShutdownC chan struct{}
 	version        string
+
+	routeFailMsg = fmt.Sprintf("failed to provision routing, please create it manually via Cloudflare dashboard or UI; "+
+		"most likely you already have a conflicting record there. You can also rerun this command with --%s to overwrite "+
+		"any existing DNS records for this hostname.", overwriteDNSFlag)
 )
 
 func Flags() []cli.Flag {
@@ -101,6 +104,7 @@ func Commands() []*cli.Command {
 		buildRouteCommand(),
 		buildRunCommand(),
 		buildListCommand(),
+		buildInfoCommand(),
 		buildIngressSubcommand(),
 		buildDeleteCommand(),
 		buildCleanupCommand(),
@@ -120,8 +124,7 @@ func Commands() []*cli.Command {
 func buildTunnelCommand(subcommands []*cli.Command) *cli.Command {
 	return &cli.Command{
 		Name:      "tunnel",
-		Action:    cliutil.ErrorHandler(TunnelCommand),
-		Before:    SetFlagsFromConfigFile,
+		Action:    cliutil.ConfiguredAction(TunnelCommand),
 		Category:  "Tunnel",
 		Usage:     "Make a locally-running web service accessible over the internet using Argo Tunnel.",
 		ArgsUsage: " ",
@@ -182,7 +185,7 @@ func runAdhocNamedTunnel(sc *subcommandContext, name, credentialsOutputPath stri
 
 	if r, ok := routeFromFlag(sc.c); ok {
 		if res, err := sc.route(tunnel.ID, r); err != nil {
-			sc.log.Err(err).Msg("failed to create route, please create it manually")
+			sc.log.Err(err).Str("route", r.String()).Msg(routeFailMsg)
 		} else {
 			sc.log.Info().Msg(res.SuccessSummary())
 		}
@@ -200,12 +203,12 @@ func runClassicTunnel(sc *subcommandContext) error {
 	return StartServer(sc.c, version, nil, sc.log, sc.isUIEnabled)
 }
 
-func routeFromFlag(c *cli.Context) (tunnelstore.Route, bool) {
+func routeFromFlag(c *cli.Context) (route tunnelstore.Route, ok bool) {
 	if hostname := c.String("hostname"); hostname != "" {
 		if lbPool := c.String("lb-pool"); lbPool != "" {
 			return tunnelstore.NewLBRoute(hostname, lbPool), true
 		}
-		return tunnelstore.NewDNSRoute(hostname), true
+		return tunnelstore.NewDNSRoute(hostname, c.Bool(overwriteDNSFlagName)), true
 	}
 	return nil, false
 }
@@ -297,7 +300,7 @@ func StartServer(
 	}()
 
 	// Serve DNS proxy stand-alone if no hostname or tag or app is going to run
-	if dnsProxyStandAlone(c) {
+	if dnsProxyStandAlone(c, namedTunnel) {
 		connectedSignal.Notify()
 		// no grace period, handle SIGINT/SIGTERM immediately
 		return waitToShutdown(&wg, cancel, errC, graceShutdownC, 0, log)
@@ -367,26 +370,6 @@ func StartServer(
 	}
 
 	return waitToShutdown(&wg, cancel, errC, graceShutdownC, c.Duration("grace-period"), log)
-}
-
-func SetFlagsFromConfigFile(c *cli.Context) error {
-	const exitCode = 1
-	log := logger.CreateLoggerFromContext(c, logger.EnableTerminalLog)
-	inputSource, err := config.ReadConfigFile(c, log)
-	if err != nil {
-		if err == config.ErrNoConfigFile {
-			return nil
-		}
-		return cli.Exit(err, exitCode)
-	}
-	targetFlags := c.Command.Flags
-	if c.Command.Name == "" {
-		targetFlags = c.App.Flags
-	}
-	if err := altsrc.ApplyInputSourceValues(c, inputSource, targetFlags); err != nil {
-		return cli.Exit(err, exitCode)
-	}
-	return nil
 }
 
 func waitToShutdown(wg *sync.WaitGroup,
@@ -477,33 +460,6 @@ func addPortIfMissing(uri *url.URL, port int) string {
 	return fmt.Sprintf("%s:%d", uri.Hostname(), port)
 }
 
-// appendFlags will append extra flags to a slice of flags.
-//
-// The cli package will panic if two flags exist with the same name,
-// so if extraFlags contains a flag that was already defined, modify the
-// original flags to use the extra version.
-func appendFlags(flags []cli.Flag, extraFlags ...cli.Flag) []cli.Flag {
-	for _, extra := range extraFlags {
-		var found bool
-
-		// Check if an extra flag overrides an existing flag.
-		for i, flag := range flags {
-			if reflect.DeepEqual(extra.Names(), flag.Names()) {
-				flags[i] = extra
-				found = true
-				break
-			}
-		}
-
-		// Append the extra flag if it has nothing to override.
-		if !found {
-			flags = append(flags, extra)
-		}
-	}
-
-	return flags
-}
-
 func tunnelFlags(shouldHide bool) []cli.Flag {
 	flags := configureCloudflaredFlags(shouldHide)
 	flags = append(flags, configureProxyFlags(shouldHide)...)
@@ -513,7 +469,7 @@ func tunnelFlags(shouldHide bool) []cli.Flag {
 		credentialsFileFlag,
 		altsrc.NewBoolFlag(&cli.BoolFlag{
 			Name:   "is-autoupdated",
-			Usage:  "Signal the new process that Argo Tunnel client has been autoupdated",
+			Usage:  "Signal the new process that Argo Tunnel connector has been autoupdated",
 			Value:  false,
 			Hidden: true,
 		}),
@@ -613,10 +569,10 @@ func tunnelFlags(shouldHide bool) []cli.Flag {
 		}),
 		altsrc.NewDurationFlag(&cli.DurationFlag{
 			Name:    "grace-period",
-			Usage:   "Duration to accept new requests after cloudflared receives first SIGINT/SIGTERM. A second SIGINT/SIGTERM will force cloudflared to shutdown immediately.",
+			Usage:   "When cloudflared receives SIGINT/SIGTERM it will stop accepting new requests, wait for in-progress requests to terminate, then shutdown. Waiting for in-progress requests will timeout after this grace period, or when a second SIGTERM/SIGINT is received.",
 			Value:   time.Second * 30,
 			EnvVars: []string{"TUNNEL_GRACE_PERIOD"},
-			Hidden:  true,
+			Hidden:  shouldHide,
 		}),
 		// Note TUN-3758 , we use Int because UInt is not supported with altsrc
 		altsrc.NewIntFlag(&cli.IntFlag{
@@ -643,7 +599,7 @@ func tunnelFlags(shouldHide bool) []cli.Flag {
 		altsrc.NewBoolFlag(&cli.BoolFlag{
 			Name:    "stdin-control",
 			Usage:   "Control the process using commands sent through stdin",
-			EnvVars: []string{"STDIN-CONTROL"},
+			EnvVars: []string{"STDIN_CONTROL"},
 			Hidden:  true,
 			Value:   false,
 		}),
@@ -652,6 +608,7 @@ func tunnelFlags(shouldHide bool) []cli.Flag {
 			Aliases: []string{"n"},
 			EnvVars: []string{"TUNNEL_NAME"},
 			Usage:   "Stable name to identify the tunnel. Using this flag will create, route and run a tunnel. For production usage, execute each command separately",
+			Hidden:  shouldHide,
 		}),
 		altsrc.NewBoolFlag(&cli.BoolFlag{
 			Name:   uiFlag,
@@ -660,6 +617,7 @@ func tunnelFlags(shouldHide bool) []cli.Flag {
 			Hidden: shouldHide,
 		}),
 		selectProtocolFlag,
+		overwriteDNSFlag,
 	}...)
 
 	return flags
@@ -746,7 +704,7 @@ func configureProxyFlags(shouldHide bool) []cli.Flag {
 			Hidden: shouldHide,
 		}),
 		altsrc.NewDurationFlag(&cli.DurationFlag{
-			Name:   ingress.ProxyTCPKeepAlive,
+			Name:   ingress.ProxyTCPKeepAliveFlag,
 			Usage:  "HTTP proxy TCP keepalive duration",
 			Value:  time.Second * 30,
 			Hidden: shouldHide,
@@ -920,7 +878,7 @@ func configureLoggingFlags(shouldHide bool) []cli.Flag {
 		altsrc.NewStringFlag(&cli.StringFlag{
 			Name:    logger.LogLevelFlag,
 			Value:   "info",
-			Usage:   "Application logging level {fatal, error, info, debug}. " + debugLevelWarning,
+			Usage:   "Application logging level {debug, info, warn, error, fatal}. " + debugLevelWarning,
 			EnvVars: []string{"TUNNEL_LOGLEVEL"},
 			Hidden:  shouldHide,
 		}),
@@ -928,7 +886,7 @@ func configureLoggingFlags(shouldHide bool) []cli.Flag {
 			Name:    logger.LogTransportLevelFlag,
 			Aliases: []string{"proto-loglevel"}, // This flag used to be called proto-loglevel
 			Value:   "info",
-			Usage:   "Transport logging level(previously called protocol logging level) {fatal, error, info, debug}",
+			Usage:   "Transport logging level(previously called protocol logging level) {debug, info, warn, error, fatal}",
 			EnvVars: []string{"TUNNEL_PROTO_LOGLEVEL", "TUNNEL_TRANSPORT_LOGLEVEL"},
 			Hidden:  shouldHide,
 		}),

@@ -12,10 +12,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudflare/cloudflared/teamnet"
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
+
+	"golang.org/x/net/http2"
+
+	"github.com/cloudflare/cloudflared/teamnet"
 )
 
 const (
@@ -43,6 +46,17 @@ type Connection struct {
 	ColoName           string    `json:"colo_name"`
 	ID                 uuid.UUID `json:"id"`
 	IsPendingReconnect bool      `json:"is_pending_reconnect"`
+	OriginIP           net.IP    `json:"origin_ip"`
+	OpenedAt           time.Time `json:"opened_at"`
+}
+
+type ActiveClient struct {
+	ID          uuid.UUID    `json:"id"`
+	Features    []string     `json:"features"`
+	Version     string       `json:"version"`
+	Arch        string       `json:"arch"`
+	RunAt       time.Time    `json:"run_at"`
+	Connections []Connection `json:"conns"`
 }
 
 type Change = string
@@ -58,6 +72,7 @@ type Route interface {
 	json.Marshaler
 	RecordType() string
 	UnmarshalResult(body io.Reader) (RouteResult, error)
+	String() string
 }
 
 type RouteResult interface {
@@ -66,27 +81,32 @@ type RouteResult interface {
 }
 
 type DNSRoute struct {
-	userHostname string
+	userHostname      string
+	overwriteExisting bool
 }
 
 type DNSRouteResult struct {
 	route *DNSRoute
 	CName Change `json:"cname"`
+	Name  string `json:"name"`
 }
 
-func NewDNSRoute(userHostname string) Route {
+func NewDNSRoute(userHostname string, overwriteExisting bool) Route {
 	return &DNSRoute{
-		userHostname: userHostname,
+		userHostname:      userHostname,
+		overwriteExisting: overwriteExisting,
 	}
 }
 
 func (dr *DNSRoute) MarshalJSON() ([]byte, error) {
 	s := struct {
-		Type         string `json:"type"`
-		UserHostname string `json:"user_hostname"`
+		Type              string `json:"type"`
+		UserHostname      string `json:"user_hostname"`
+		OverwriteExisting bool   `json:"overwrite_existing"`
 	}{
-		Type:         dr.RecordType(),
-		UserHostname: dr.userHostname,
+		Type:              dr.RecordType(),
+		UserHostname:      dr.userHostname,
+		OverwriteExisting: dr.overwriteExisting,
 	}
 	return json.Marshal(&s)
 }
@@ -102,6 +122,10 @@ func (dr *DNSRoute) RecordType() string {
 	return "dns"
 }
 
+func (dr *DNSRoute) String() string {
+	return fmt.Sprintf("%s %s", dr.RecordType(), dr.userHostname)
+}
+
 func (res *DNSRouteResult) SuccessSummary() string {
 	var msgFmt string
 	switch res.CName {
@@ -112,7 +136,16 @@ func (res *DNSRouteResult) SuccessSummary() string {
 	case ChangeUnchanged:
 		msgFmt = "%s is already configured to route to your tunnel"
 	}
-	return fmt.Sprintf(msgFmt, res.route.userHostname)
+	return fmt.Sprintf(msgFmt, res.hostname())
+}
+
+// hostname yields the resulting name for the DNS route; if that is not available from Cloudflare API, then the
+// requested name is returned instead (should not be the common path, it is just a fall-back).
+func (res *DNSRouteResult) hostname() string {
+	if res.Name != "" {
+		return res.Name
+	}
+	return res.route.userHostname
 }
 
 type LBRoute struct {
@@ -148,6 +181,10 @@ func (lr *LBRoute) MarshalJSON() ([]byte, error) {
 
 func (lr *LBRoute) RecordType() string {
 	return "lb"
+}
+
+func (lb *LBRoute) String() string {
+	return fmt.Sprintf("%s %s %s", lb.RecordType(), lb.lbName, lb.lbPool)
 }
 
 func (lr *LBRoute) UnmarshalResult(body io.Reader) (RouteResult, error) {
@@ -192,7 +229,8 @@ type Client interface {
 	GetTunnel(tunnelID uuid.UUID) (*Tunnel, error)
 	DeleteTunnel(tunnelID uuid.UUID) error
 	ListTunnels(filter *Filter) ([]*Tunnel, error)
-	CleanupConnections(tunnelID uuid.UUID) error
+	ListActiveClients(tunnelID uuid.UUID) ([]*ActiveClient, error)
+	CleanupConnections(tunnelID uuid.UUID, params *CleanupParams) error
 	RouteTunnel(tunnelID uuid.UUID, route Route) (RouteResult, error)
 
 	// Teamnet endpoints
@@ -234,6 +272,11 @@ func NewRESTClient(baseURL, accountTag, zoneTag, authToken, userAgent string, lo
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create account level endpoint")
 	}
+	httpTransport := http.Transport{
+		TLSHandshakeTimeout:   defaultTimeout,
+		ResponseHeaderTimeout: defaultTimeout,
+	}
+	http2.ConfigureTransport(&httpTransport)
 	return &RESTClient{
 		baseEndpoints: &baseEndpoints{
 			accountLevel:  *accountLevelEndpoint,
@@ -243,11 +286,8 @@ func NewRESTClient(baseURL, accountTag, zoneTag, authToken, userAgent string, lo
 		authToken: authToken,
 		userAgent: userAgent,
 		client: http.Client{
-			Transport: &http.Transport{
-				TLSHandshakeTimeout:   defaultTimeout,
-				ResponseHeaderTimeout: defaultTimeout,
-			},
-			Timeout: defaultTimeout,
+			Transport: &httpTransport,
+			Timeout:   defaultTimeout,
 		},
 		log: log,
 	}, nil
@@ -336,8 +376,31 @@ func parseListTunnels(body io.ReadCloser) ([]*Tunnel, error) {
 	return tunnels, err
 }
 
-func (r *RESTClient) CleanupConnections(tunnelID uuid.UUID) error {
+func (r *RESTClient) ListActiveClients(tunnelID uuid.UUID) ([]*ActiveClient, error) {
 	endpoint := r.baseEndpoints.accountLevel
+	endpoint.Path = path.Join(endpoint.Path, fmt.Sprintf("%v/connections", tunnelID))
+	resp, err := r.sendRequest("GET", endpoint, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "REST request failed")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		return parseConnectionsDetails(resp.Body)
+	}
+
+	return nil, r.statusCodeToError("list connection details", resp)
+}
+
+func parseConnectionsDetails(reader io.Reader) ([]*ActiveClient, error) {
+	var clients []*ActiveClient
+	err := parseResponse(reader, &clients)
+	return clients, err
+}
+
+func (r *RESTClient) CleanupConnections(tunnelID uuid.UUID, params *CleanupParams) error {
+	endpoint := r.baseEndpoints.accountLevel
+	endpoint.RawQuery = params.encode()
 	endpoint.Path = path.Join(endpoint.Path, fmt.Sprintf("%v/connections", tunnelID))
 	resp, err := r.sendRequest("DELETE", endpoint, nil)
 	if err != nil {

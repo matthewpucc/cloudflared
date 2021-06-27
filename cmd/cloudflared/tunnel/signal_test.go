@@ -1,3 +1,5 @@
+// +build !windows
+
 package tunnel
 
 import (
@@ -101,4 +103,3 @@ func TestWaitForShutdown(t *testing.T) {
 	assert.True(t, contextCancelled)
 	assert.True(t, time.Now().Sub(startTime) < time.Second) // check that wait ended early
 }
-

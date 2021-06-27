@@ -7,13 +7,13 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/rs/zerolog"
+	"github.com/urfave/cli/v2"
+
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/tunnel"
 	"github.com/cloudflare/cloudflared/config"
 	"github.com/cloudflare/cloudflared/logger"
-
-	"github.com/rs/zerolog"
-	"github.com/urfave/cli/v2"
 )
 
 func runApp(app *cli.App, graceShutdownC chan struct{}) {
@@ -24,7 +24,7 @@ func runApp(app *cli.App, graceShutdownC chan struct{}) {
 			{
 				Name:   "install",
 				Usage:  "Install Argo Tunnel as a system service",
-				Action: cliutil.ErrorHandler(installLinuxService),
+				Action: cliutil.ConfiguredAction(installLinuxService),
 				Flags: []cli.Flag{
 					&cli.BoolFlag{
 						Name:  "legacy",
@@ -35,7 +35,7 @@ func runApp(app *cli.App, graceShutdownC chan struct{}) {
 			{
 				Name:   "uninstall",
 				Usage:  "Uninstall the Argo Tunnel service",
-				Action: cliutil.ErrorHandler(uninstallLinuxService),
+				Action: cliutil.ConfiguredAction(uninstallLinuxService),
 			},
 		},
 	})
@@ -238,7 +238,7 @@ func installLinuxService(c *cli.Context) error {
 			"--origincert", serviceConfigDir + "/" + serviceCredentialFile,
 		}
 	} else {
-		src, err := config.ReadConfigFile(c, log)
+		src, _, err := config.ReadConfigFile(c, log)
 		if err != nil {
 			return err
 		}

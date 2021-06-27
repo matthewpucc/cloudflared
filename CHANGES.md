@@ -1,5 +1,101 @@
 **Experimental**: This is a new format for release notes. The format and availability is subject to change.
 
+## 2021.6.0
+### Bug Fixes
+- Fixes a http2 transport (the new default for Named Tunnels) to work with unix socket origins.
+
+
+## 2021.5.10
+### Bug Fixes
+- Fixes a memory leak in h2mux transport that connects cloudflared to Cloudflare edge.
+
+
+## 2021.5.9
+### New Features
+- Uses new Worker based login helper service to facilitate token exchange in cloudflared flows.
+
+### Bug Fixes
+- Fixes Centos-7 builds.
+
+## 2021.5.8
+### New Features
+- When creating a DNS record to point a hostname at a tunnel, you can now use --overwrite-dns to overwrite any existing
+  DNS records with that hostname. This works both when using the CLI to provision DNS, as well as when starting an adhoc
+  named tunnel, e.g.:
+  - `cloudflared tunnel route dns --overwrite-dns foo-tunnel foo.example.com`
+  - `cloudflared tunnel --overwrite-dns --name foo-tunnel --hostname foo.example.com`
+
+## 2021.5.7
+### New Features
+- Named Tunnels will automatically select the protocol to connect to Cloudflare's edge network.
+
+## 2021.5.0
+
+### New Features
+- It is now possible to run the same tunnel using more than one `cloudflared` instance. This is a server-side change and
+  is compatible with any client version that uses Named Tunnels.
+
+  To get started, visit our [developer documentation](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/run-tunnel/deploy-cloudflared-replicas).
+- `cloudflared tunnel ingress validate` will now warn about unused keys in your config file. This is helpful for
+  detecting typos in your config.
+- If `cloudflared` detects it is running inside a Linux container, it will limit itself to use only the number of CPUs
+  the pod has been granted, instead of trying to use every CPU available.
+
+## 2021.4.0
+
+### Bug Fixes
+
+- Fixed proxying of websocket requests to avoid possibility of losing initial frames that were sent in the same TCP
+  packet as response headers [#345](https://github.com/cloudflare/cloudflared/issues/345).
+- `proxy-dns` option now works in conjunction with running a named tunnel [#346](https://github.com/cloudflare/cloudflared/issues/346).
+
+## 2021.3.6
+
+### Bug Fixes
+
+- Reverted 2021.3.5 improvement to use HTTP/2 in a best-effort manner between cloudflared and origin services because
+  it was found to break in some cases.
+
+## 2021.3.5
+
+### Improvements
+
+ - HTTP/2 transport is now always chosen if origin server supports it and the service url scheme is HTTPS.
+   This was previously done in a best attempt manner.
+
+### Bug Fixes
+
+ - The MacOS binaries were not successfully released in 2021.3.3 and 2021.3.4. This release is aimed at addressing that.
+
+## 2021.3.3
+
+### Improvements
+
+- Tunnel create command, as well as, running ad-hoc tunnels using `cloudflared tunnel -name NAME`, will not overwrite
+  existing files when writing tunnel credentials.
+
+### Bug Fixes
+
+- Tunnel create and delete commands no longer use path to credentials from the configuration file.
+  If you need ot place tunnel credentials file at a specific location, you must use `--credentials-file` flag.
+- Access ssh-gen creates properly named keys for SSH short lived certs.
+
+
+## 2021.3.2
+
+### New Features
+
+- It is now possible to obtain more detailed information about the cloudflared connectors to Cloudflare Edge via
+  `cloudflared tunnel info <name/uuid>`. It is possible to sort the output as well as output in different formats,
+  such as: `cloudflared tunnel info --sort-by version --invert-sort --output json <name/uuid>`.
+  You can obtain more information via `cloudflared tunnel info --help`.
+
+### Bug Fixes
+
+- Don't look for configuration file in default paths when `--config FILE` flag is present after `tunnel` subcommand.
+- cloudflared access token command now functions correctly with the new token-per-app change from 2021.3.0.
+
+
 ## 2021.3.0
 
 ### New Features
@@ -22,7 +118,7 @@ ingress:
           ports: [80, 443]
           allow: true
 ```
-  
+
 
 ### Improvements
 
@@ -74,4 +170,3 @@ ingress:
 
 - The maximum number of upstream connections is now limited by default which should fix reported issues of cloudflared
   exhausting CPU usage when faced with connectivity issues.
-

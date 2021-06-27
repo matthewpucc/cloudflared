@@ -7,13 +7,13 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cloudflare/cloudflared/h2mux"
-	tunnelpogs "github.com/cloudflare/cloudflared/tunnelrpc/pogs"
-	"github.com/cloudflare/cloudflared/websocket"
-
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/cloudflare/cloudflared/h2mux"
+	tunnelpogs "github.com/cloudflare/cloudflared/tunnelrpc/pogs"
+	"github.com/cloudflare/cloudflared/websocket"
 )
 
 const (
@@ -167,7 +167,8 @@ func (h *h2muxConnection) serveMuxer(ctx context.Context) error {
 }
 
 func (h *h2muxConnection) controlLoop(ctx context.Context, connectedFuse ConnectedFuse, isNamedTunnel bool) {
-	updateMetricsTickC := time.Tick(h.muxerConfig.MetricsUpdateFreq)
+	updateMetricsTicker := time.NewTicker(h.muxerConfig.MetricsUpdateFreq)
+	defer updateMetricsTicker.Stop()
 	var shutdownCompleted <-chan struct{}
 	for {
 		select {
@@ -191,7 +192,7 @@ func (h *h2muxConnection) controlLoop(ctx context.Context, connectedFuse Connect
 			// don't wait for shutdown to finish when context is closed, this is the hard termination path
 			return
 
-		case <-updateMetricsTickC:
+		case <-updateMetricsTicker.C:
 			h.observer.metrics.updateMuxerMetrics(h.connIndexStr, h.muxer.Metrics())
 		}
 	}
@@ -234,7 +235,7 @@ func (h *h2muxConnection) newRequest(stream *h2mux.MuxedStream) (*http.Request, 
 	if err != nil {
 		return nil, errors.Wrap(err, "Unexpected error from http.NewRequest")
 	}
-	err = h2mux.H2RequestHeadersToH1Request(stream.Headers, req)
+	err = H2RequestHeadersToH1Request(stream.Headers, req)
 	if err != nil {
 		return nil, errors.Wrap(err, "invalid request received")
 	}
@@ -246,15 +247,15 @@ type h2muxRespWriter struct {
 }
 
 func (rp *h2muxRespWriter) WriteRespHeaders(status int, header http.Header) error {
-	headers := h2mux.H1ResponseToH2ResponseHeaders(status, header)
-	headers = append(headers, h2mux.Header{Name: ResponseMetaHeaderField, Value: responseMetaHeaderOrigin})
+	headers := H1ResponseToH2ResponseHeaders(status, header)
+	headers = append(headers, h2mux.Header{Name: ResponseMetaHeader, Value: responseMetaHeaderOrigin})
 	return rp.WriteHeaders(headers)
 }
 
 func (rp *h2muxRespWriter) WriteErrorResponse() {
 	_ = rp.WriteHeaders([]h2mux.Header{
 		{Name: ":status", Value: "502"},
-		{Name: ResponseMetaHeaderField, Value: responseMetaHeaderCfd},
+		{Name: ResponseMetaHeader, Value: responseMetaHeaderCfd},
 	})
 	_, _ = rp.Write([]byte("502 Bad Gateway"))
 }

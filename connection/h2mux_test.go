@@ -38,7 +38,7 @@ func newH2MuxConnection(t require.TestingT) (*h2muxConnection, *h2mux.Muxer) {
 				// we only expect RPC traffic in client->edge direction, provide minimal support for mocking
 				require.True(t, stream.IsRPCStream())
 				return stream.WriteHeaders([]h2mux.Header{
-					{Name:  ":status", Value: "200"},
+					{Name: ":status", Value: "200"},
 				})
 			}),
 		}
@@ -115,9 +115,9 @@ func TestServeStreamHTTP(t *testing.T) {
 		require.True(t, hasHeader(stream, ":status", strconv.Itoa(test.expectedStatus)))
 
 		if test.isProxyError {
-			assert.True(t, hasHeader(stream, ResponseMetaHeaderField, responseMetaHeaderCfd))
+			assert.True(t, hasHeader(stream, ResponseMetaHeader, responseMetaHeaderCfd))
 		} else {
-			assert.True(t, hasHeader(stream, ResponseMetaHeaderField, responseMetaHeaderOrigin))
+			assert.True(t, hasHeader(stream, ResponseMetaHeader, responseMetaHeaderOrigin))
 			body := make([]byte, len(test.expectedBody))
 			_, err = stream.Read(body)
 			require.NoError(t, err)
@@ -164,7 +164,7 @@ func TestServeStreamWS(t *testing.T) {
 	require.NoError(t, err)
 
 	require.True(t, hasHeader(stream, ":status", strconv.Itoa(http.StatusSwitchingProtocols)))
-	assert.True(t, hasHeader(stream, ResponseMetaHeaderField, responseMetaHeaderOrigin))
+	assert.True(t, hasHeader(stream, ResponseMetaHeader, responseMetaHeaderOrigin))
 
 	data := []byte("test websocket")
 	err = wsutil.WriteClientText(writePipe, data)
@@ -268,7 +268,7 @@ func benchmarkServeStreamHTTPSimple(b *testing.B, test testRequest) {
 		b.StopTimer()
 
 		require.NoError(b, openstreamErr)
-		assert.True(b, hasHeader(stream, ResponseMetaHeaderField, responseMetaHeaderOrigin))
+		assert.True(b, hasHeader(stream, ResponseMetaHeader, responseMetaHeaderOrigin))
 		require.True(b, hasHeader(stream, ":status", strconv.Itoa(http.StatusOK)))
 		require.NoError(b, readBodyErr)
 		require.Equal(b, test.expectedBody, body)

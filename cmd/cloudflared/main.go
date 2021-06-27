@@ -6,21 +6,22 @@ import (
 	"strings"
 	"time"
 
+	"github.com/getsentry/raven-go"
+	homedir "github.com/mitchellh/go-homedir"
+	"github.com/pkg/errors"
+	"github.com/urfave/cli/v2"
+	"go.uber.org/automaxprocs/maxprocs"
+
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/access"
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
-	"github.com/cloudflare/cloudflared/config"
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/proxydns"
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/tunnel"
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/updater"
+	"github.com/cloudflare/cloudflared/config"
 	"github.com/cloudflare/cloudflared/logger"
 	"github.com/cloudflare/cloudflared/metrics"
 	"github.com/cloudflare/cloudflared/overwatch"
 	"github.com/cloudflare/cloudflared/watcher"
-
-	"github.com/getsentry/raven-go"
-	"github.com/mitchellh/go-homedir"
-	"github.com/pkg/errors"
-	"github.com/urfave/cli/v2"
 )
 
 const (
@@ -47,6 +48,7 @@ func main() {
 	rand.Seed(time.Now().UnixNano())
 	metrics.RegisterBuildInfo(BuildTime, Version)
 	raven.SetRelease(Version)
+	maxprocs.Set()
 
 	// Graceful shutdown channel used by the app. When closed, app must terminate gracefully.
 	// Windows service manager closes this channel when it receives stop command.
@@ -77,7 +79,6 @@ func main() {
 	See https://developers.cloudflare.com/argo-tunnel/ for more in-depth documentation.`
 	app.Flags = flags()
 	app.Action = action(graceShutdownC)
-	app.Before = tunnel.SetFlagsFromConfigFile
 	app.Commands = commands(cli.ShowVersion)
 
 	tunnel.Init(Version, graceShutdownC) // we need this to support the tunnel sub command...
@@ -90,7 +91,7 @@ func commands(version func(c *cli.Context)) []*cli.Command {
 	cmds := []*cli.Command{
 		{
 			Name:   "update",
-			Action: cliutil.ErrorHandler(updater.Update),
+			Action: cliutil.ConfiguredAction(updater.Update),
 			Usage:  "Update the agent if a new version exists",
 			Flags: []cli.Flag{
 				&cli.BoolFlag{
@@ -145,7 +146,7 @@ func isEmptyInvocation(c *cli.Context) bool {
 }
 
 func action(graceShutdownC chan struct{}) cli.ActionFunc {
-	return cliutil.ErrorHandler(func(c *cli.Context) (err error) {
+	return cliutil.ConfiguredAction(func(c *cli.Context) (err error) {
 		if isEmptyInvocation(c) {
 			return handleServiceMode(c, graceShutdownC)
 		}
